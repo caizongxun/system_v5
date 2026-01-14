@@ -27,13 +27,6 @@ class DataProcessor:
         """
         df = df.copy()
         
-        # Keep original OHLCV for direct prediction
-        df['price_open'] = df['open']
-        df['price_high'] = df['high']
-        df['price_low'] = df['low']
-        df['price_close'] = df['close']
-        df['price_volume'] = df['volume']
-        
         # Basic features
         df['returns'] = df['close'].pct_change()
         df['high_low_ratio'] = (df['high'] - df['low']) / df['close']
