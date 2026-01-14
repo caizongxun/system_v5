@@ -78,10 +78,8 @@ def preprocess_data(df, processor, feature_columns):
     return normalized_data, scaler, df_processed
 
 def plot_klines(df_historical, predicted_klines):
-    # Take last 100 K-bars as background
     df_plot = df_historical.tail(100).copy()
     
-    # Convert time format
     if isinstance(df_plot['open_time'].iloc[0], str):
         df_plot['open_time'] = pd.to_datetime(df_plot['open_time'])
     
@@ -93,7 +91,6 @@ def plot_klines(df_historical, predicted_klines):
         subplot_titles=("BTC 15m K-Line with Predictions (Fixed Baseline)", "Volume")
     )
     
-    # Plot historical K-bars
     fig.add_trace(
         go.Candlestick(
             x=df_plot['open_time'],
@@ -107,7 +104,6 @@ def plot_klines(df_historical, predicted_klines):
         row=1, col=1
     )
     
-    # Plot predicted K-bars
     if predicted_klines:
         pred_times = [k['time'] for k in predicted_klines]
         pred_opens = [k['open'] for k in predicted_klines]
@@ -128,7 +124,6 @@ def plot_klines(df_historical, predicted_klines):
             row=1, col=1
         )
     
-    # Plot volume
     fig.add_trace(
         go.Bar(
             x=df_plot['open_time'],
@@ -153,7 +148,6 @@ def plot_klines(df_historical, predicted_klines):
             row=2, col=1
         )
     
-    # Update layout
     fig.update_layout(
         title="BTC/USDT 15M with Price Predictions (Fixed Baseline)",
         yaxis_title='Price (USDT)',
@@ -195,9 +189,17 @@ def main():
     st.title("BTC 15M Price Prediction Model (Fixed Baseline)")
     st.markdown("---")
     
-    # Sidebar
     with st.sidebar:
         st.header("Settings")
+        
+        volatility_multiplier = st.slider(
+            "Volatility Multiplier",
+            min_value=0.5,
+            max_value=5.0,
+            value=2.0,
+            step=0.5,
+            help="Controls how much visible volatility appears in predictions. Higher values show more price fluctuation."
+        )
         
         show_table = st.checkbox("Show Prediction Table", value=True)
         show_analysis = st.checkbox("Show Volatility Analysis", value=True)
@@ -212,7 +214,6 @@ def main():
         regardless of current price changes.
         """)
     
-    # Load model and data
     st.info("Loading model and data...")
     
     try:
@@ -222,24 +223,21 @@ def main():
         
         st.success("Model and data loaded successfully!")
         
-        # Preprocess
         normalized_data, scaler, df_processed = preprocess_data(df, processor, feature_columns)
         
-        # Create predictor
         predictor = RollingPredictor(model, scaler, feature_columns, device)
         
-        # Make predictions using fixed baseline (last 100 bars)
         st.info("Generating predictions...")
         X_baseline = normalized_data[-100:]
-        predicted_klines = predictor.predict_with_fixed_baseline(X_baseline, df)
+        predicted_klines = predictor.predict_with_fixed_baseline(
+            X_baseline, df, volatility_multiplier=volatility_multiplier
+        )
         st.success("Predictions generated!")
         
-        # Display chart
         st.subheader("Price Chart with Predictions")
         fig = plot_klines(df, predicted_klines)
         st.plotly_chart(fig, use_container_width=True)
         
-        # Key metrics
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
@@ -274,23 +272,19 @@ def main():
         
         st.markdown("---")
         
-        # Volatility analysis
         if show_analysis:
             st.subheader("Volatility Analysis")
             
             col1, col2, col3 = st.columns(3)
             
-            # Current volatility
             current_vol = df['close'].pct_change().tail(20).std() * 100
             
-            # Predicted volatility
             pred_returns = []
             for k in predicted_klines:
                 ret = (k['close'] - k['open']) / k['open']
                 pred_returns.append(ret)
             pred_vol = np.std(pred_returns) * 100
             
-            # Price range
             pred_range = max([k['high'] for k in predicted_klines]) - min([k['low'] for k in predicted_klines])
             
             with col1:
@@ -312,14 +306,12 @@ def main():
                     f"${pred_range:.2f}"
                 )
         
-        # Prediction table
         if show_table:
             st.markdown("---")
             st.subheader("Detailed Predictions")
             pred_df = display_prediction_table(predicted_klines)
             st.dataframe(pred_df, use_container_width=True)
         
-        # Model metrics
         if show_metrics:
             st.markdown("---")
             st.subheader("Model Performance Metrics")
@@ -341,15 +333,14 @@ def main():
             col1, col2, col3 = st.columns(3)
             
             with col1:
-                st.metric("R2 Score (Test)", "0.8334")
+                st.metric("R2 Score (Test)", "0.8473")
             
             with col2:
-                st.metric("RMSE", "0.0887")
+                st.metric("RMSE", "0.0881")
             
             with col3:
-                st.metric("MAE", "0.0463")
+                st.metric("MAE", "0.0417")
         
-        # Information sections
         st.markdown("---")
         st.subheader("Model Information")
         
@@ -389,6 +380,19 @@ def main():
             - MACD: Moving Average Convergence Divergence
             - BB_Position: Bollinger Bands position
             - Volume_Ratio: Volume vs 20-bar MA
+            """)
+        
+        with st.expander("Volatility Multiplier"):
+            st.write(f"""
+            Current multiplier: {volatility_multiplier}
+            
+            The volatility multiplier enhances the visible price fluctuations in predictions:
+            - Lower values (0.5-1.0): Smoother predictions, less visible movement
+            - Default value (2.0): Balanced representation of model predictions
+            - Higher values (3.0-5.0): More pronounced price swings, easier to visualize
+            
+            The actual model predictions remain unchanged regardless of this setting.
+            This multiplier only affects visualization for clarity.
             """)
         
         with st.expander("Disclaimer"):
