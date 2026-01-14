@@ -1,159 +1,125 @@
-import pandas as pd
 import numpy as np
-from sklearn.preprocessing import MinMaxScaler
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+import ta
 import logging
-from typing import Tuple, Dict
 
 logger = logging.getLogger(__name__)
 
 class DataProcessor:
+    """
+    Process market data: add technical indicators and normalize features.
+    Uses StandardScaler instead of MinMaxScaler to preserve variance in returns.
+    """
+    
     def __init__(self):
-        self.scaler = MinMaxScaler()
-        self.scaler_dict = {}
+        pass
     
     def add_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Add technical indicators to dataframe.
-        Focus on relative changes instead of absolute prices.
+        Add technical indicators to OHLCV data.
         
         Args:
-            df: DataFrame with OHLCV data
+            df: DataFrame with columns [open_time, open, high, low, close, volume]
             
         Returns:
-            DataFrame with added indicators
+            DataFrame with added technical indicators
         """
         df = df.copy()
         
-        # Price changes (relative, not absolute)
+        # Basic features
         df['returns'] = df['close'].pct_change()
         df['high_low_ratio'] = (df['high'] - df['low']) / df['close']
         df['open_close_ratio'] = (df['close'] - df['open']) / df['open']
         
-        # Moving averages (normalized)
-        df['SMA_10'] = df['close'].rolling(window=10).mean()
-        df['SMA_20'] = df['close'].rolling(window=20).mean()
-        df['SMA_50'] = df['close'].rolling(window=50).mean()
+        # Moving averages
+        df['price_to_sma_10'] = df['close'] / df['close'].rolling(window=10).mean()
+        df['price_to_sma_20'] = df['close'] / df['close'].rolling(window=20).mean()
         
-        # Price relative to moving averages
-        df['price_to_sma_10'] = (df['close'] - df['SMA_10']) / df['SMA_10']
-        df['price_to_sma_20'] = (df['close'] - df['SMA_20']) / df['SMA_20']
-        
-        # Volatility (rolling standard deviation of returns)
+        # Volatility
+        df['volatility_5'] = df['returns'].rolling(window=5).std()
         df['volatility_20'] = df['returns'].rolling(window=20).std()
-        df['volatility_5'] = df['returns'].rolling(window=5).std()  # Short-term volatility
+        df['ATR'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=14)
+        df['ATR'] = df['ATR'] / df['close']  # Normalize by price
         
-        # Momentum (rate of change)
-        df['momentum_5'] = df['close'].pct_change(periods=5)
-        df['momentum_10'] = df['close'].pct_change(periods=10)
+        # Momentum
+        df['momentum_5'] = df['close'].diff(5) / df['close'].shift(5)
+        df['momentum_10'] = df['close'].diff(10) / df['close'].shift(10)
         
-        # Average True Range (normalized volatility measure)
-        df['ATR'] = self._calculate_atr(df, period=14)
+        # RSI
+        df['RSI'] = ta.momentum.rsi(df['close'], window=14) / 100  # Normalize to [0,1]
         
-        # RSI (already captures momentum)
-        df['RSI'] = self._calculate_rsi(df['close'], period=14)
+        # MACD
+        macd_result = ta.trend.macd(df['close'])
+        df['MACD'] = macd_result.iloc[:, 0] / df['close']  # Normalize
+        df['MACD_Signal'] = macd_result.iloc[:, 1] / df['close']
         
-        macd_result = self._calculate_macd(df['close'])
-        df['MACD'] = macd_result['MACD']
-        df['MACD_Signal'] = macd_result['Signal']
-        df['MACD_Diff'] = macd_result['Diff']
+        # Bollinger Bands
+        bb = ta.volatility.bollinger_channel(df['close'], window=20, scalar=2)
+        df['BB_Position'] = (df['close'] - bb.iloc[:, 0]) / (bb.iloc[:, 2] - bb.iloc[:, 0])
+        df['BB_Position'] = df['BB_Position'].fillna(0.5)  # Fill NaN with middle
         
-        bb_result = self._calculate_bollinger_bands(df['close'], period=20)
-        df['BB_Upper'] = bb_result['Upper']
-        df['BB_Middle'] = bb_result['Middle']
-        df['BB_Lower'] = bb_result['Lower']
-        df['BB_Position'] = (df['close'] - bb_result['Lower']) / (bb_result['Upper'] - bb_result['Lower'])
+        # Volume
+        df['Volume_Ratio'] = df['volume'] / df['volume'].rolling(window=20).mean()
         
-        df['Volume_SMA'] = df['volume'].rolling(window=20).mean()
-        df['Volume_Ratio'] = df['volume'] / df['Volume_SMA']
-        
-        # Standard deviation of returns (volatility prediction helper)
+        # Returns std (volatility of returns)
         df['returns_std_5'] = df['returns'].rolling(window=5).std()
         
+        # Drop NaN rows
         df = df.dropna()
+        
         logger.info(f"Added technical indicators. Shape after dropna: {df.shape}")
         
         return df
     
-    def _calculate_atr(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
+    def normalize_features(
+        self, 
+        df: pd.DataFrame,
+        feature_columns: list
+    ) -> tuple:
         """
-        Calculate Average True Range - normalized measure of volatility
-        """
-        high = df['high']
-        low = df['low']
-        close = df['close']
-        
-        tr1 = high - low
-        tr2 = abs(high - close.shift())
-        tr3 = abs(low - close.shift())
-        
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr = tr.rolling(window=period).mean() / close
-        
-        return atr
-    
-    def _calculate_rsi(self, prices: pd.Series, period: int = 14) -> pd.Series:
-        """Calculate Relative Strength Index"""
-        delta = prices.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-        rs = gain / loss
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
-    def _calculate_macd(self, prices: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> Dict:
-        """Calculate MACD"""
-        ema_fast = prices.ewm(span=fast).mean()
-        ema_slow = prices.ewm(span=slow).mean()
-        macd = ema_fast - ema_slow
-        signal_line = macd.ewm(span=signal).mean()
-        histogram = macd - signal_line
-        
-        return {
-            'MACD': macd,
-            'Signal': signal_line,
-            'Diff': histogram
-        }
-    
-    def _calculate_bollinger_bands(self, prices: pd.Series, period: int = 20, std_dev: int = 2) -> Dict:
-        """Calculate Bollinger Bands"""
-        sma = prices.rolling(window=period).mean()
-        std = prices.rolling(window=period).std()
-        upper = sma + (std_dev * std)
-        lower = sma - (std_dev * std)
-        
-        return {
-            'Upper': upper,
-            'Middle': sma,
-            'Lower': lower
-        }
-    
-    def normalize_features(self, df: pd.DataFrame, feature_columns: list) -> Tuple[np.ndarray, MinMaxScaler]:
-        """
-        Normalize features using MinMaxScaler
+        Normalize features using StandardScaler (Z-score normalization).
+        This preserves variance better than MinMaxScaler for returns prediction.
         
         Args:
             df: DataFrame with features
-            feature_columns: List of columns to normalize
+            feature_columns: List of column names to normalize
             
         Returns:
-            Normalized array and scaler object
+            (normalized_data: np.ndarray, scaler: StandardScaler)
         """
-        scaler = MinMaxScaler()
-        normalized_data = scaler.fit_transform(df[feature_columns])
+        data = df[feature_columns].values
+        
+        # Use StandardScaler instead of MinMaxScaler
+        # This preserves variance in the data better for regression tasks
+        scaler = StandardScaler()
+        normalized_data = scaler.fit_transform(data)
+        
         logger.info(f"Normalized {len(feature_columns)} features")
+        logger.info(f"Scaler type: StandardScaler (Z-score)")
+        logger.info(f"Returns mean: {normalized_data[:, feature_columns.index('returns')].mean():.6f}")
+        logger.info(f"Returns std: {normalized_data[:, feature_columns.index('returns')].std():.6f}")
+        
         return normalized_data, scaler
     
-    def create_sequences(self, data: np.ndarray, seq_length: int, pred_length: int) -> Tuple[np.ndarray, np.ndarray]:
+    def create_sequences(
+        self,
+        data: np.ndarray,
+        seq_length: int,
+        pred_length: int
+    ) -> tuple:
         """
-        Create sequences for LSTM training
+        Create sequences for LSTM training.
+        Each sequence: X(seq_length bars) -> y(pred_length future bars)
         
         Args:
-            data: Normalized data array
-            seq_length: Input sequence length (100)
-            pred_length: Prediction sequence length (15)
+            data: Normalized feature array (num_samples, num_features)
+            seq_length: Input sequence length (e.g., 100)
+            pred_length: Output sequence length (e.g., 15)
             
         Returns:
-            X, y sequences
+            (X, y) where X shape is (num_sequences, seq_length, num_features)
+                       and y shape is (num_sequences, pred_length, num_features)
         """
         X, y = [], []
         
@@ -165,4 +131,34 @@ class DataProcessor:
         y = np.array(y)
         
         logger.info(f"Created sequences: X shape {X.shape}, y shape {y.shape}")
+        
         return X, y
+    
+    def prepare_train_test_split(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        train_ratio: float = 0.8
+    ) -> tuple:
+        """
+        Split data into train/test sets.
+        
+        Args:
+            X: Input sequences
+            y: Target sequences
+            train_ratio: Ratio of training data
+            
+        Returns:
+            (X_train, X_test, y_train, y_test)
+        """
+        split_idx = int(len(X) * train_ratio)
+        
+        X_train = X[:split_idx]
+        X_test = X[split_idx:]
+        y_train = y[:split_idx]
+        y_test = y[split_idx:]
+        
+        logger.info(f"Train set size: {len(X_train)}")
+        logger.info(f"Test set size: {len(X_test)}")
+        
+        return X_train, X_test, y_train, y_test
