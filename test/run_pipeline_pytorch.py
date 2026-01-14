@@ -7,6 +7,7 @@ import torch
 from torch.utils.data import TensorDataset, DataLoader as TorchDataLoader
 import gc
 import pickle
+import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -63,6 +64,9 @@ def step_2_preprocess_data(df, config):
     
     processor = DataProcessor()
     
+    # Store original df for time-based prediction later
+    df_original = df.copy()
+    
     if config['features']['use_technical_indicators']:
         df = processor.add_technical_indicators(df)
     
@@ -74,17 +78,21 @@ def step_2_preprocess_data(df, config):
         'returns_std_5'
     ])
     
-    logger.info(f"Using {len(feature_columns)} features: {feature_columns}")
+    logger.info(f"Using {len(feature_columns)} features for prediction:")
+    for i, feat in enumerate(feature_columns, 1):
+        logger.info(f"  {i:2d}. {feat}")
     
     # Use StandardScaler instead of MinMaxScaler for better variance preservation
     normalized_data, scaler = processor.normalize_features(df, feature_columns)
     
     logger.info(f"Data normalized using StandardScaler (Z-score).")
     logger.info(f"Normalized shape: {normalized_data.shape}")
+    logger.info(f"Returns (idx=0) - mean: {normalized_data[:, 0].mean():.6f}, std: {normalized_data[:, 0].std():.6f}")
+    logger.info(f"Volatility_5 (idx=6) - mean: {normalized_data[:, 6].mean():.6f}, std: {normalized_data[:, 6].std():.6f}")
     
-    return normalized_data, scaler, feature_columns, processor
+    return normalized_data, scaler, feature_columns, processor, df
 
-def step_3_create_sequences(normalized_data, config):
+def step_3_create_sequences(normalized_data, config, df_with_timestamps):
     print_section("STEP 3: Creating Sequences")
     
     processor = DataProcessor()
@@ -93,10 +101,16 @@ def step_3_create_sequences(normalized_data, config):
     
     X, y = processor.create_sequences(normalized_data, seq_length, pred_length)
     
-    logger.info(f"Sequences created: X shape {X.shape}, y shape {y.shape}")
-    logger.info(f"Sample target returns std: {y[:, :, 0].std():.6f}")
+    # Store timestamps for time-based prediction
+    # The i-th sequence corresponds to close_time at position (i + seq_length + pred_length - 1)
+    sequence_end_indices = np.arange(seq_length + pred_length - 1, len(df_with_timestamps))
     
-    return X, y
+    logger.info(f"Sequences created: X shape {X.shape}, y shape {y.shape}")
+    logger.info(f"Number of sequences: {len(X)}")
+    logger.info(f"Sample volatility_5 (idx=6): mean={y[:, :, 6].mean():.6f}, std={y[:, :, 6].std():.6f}")
+    logger.info(f"Sample volatility_20 (idx=5): mean={y[:, :, 5].mean():.6f}, std={y[:, :, 5].std():.6f}")
+    
+    return X, y, sequence_end_indices, df_with_timestamps
 
 def step_4_split_data(X, y, config):
     print_section("STEP 4: Splitting Data")
@@ -123,11 +137,16 @@ def step_4_split_data(X, y, config):
 def step_5_build_model(config, num_features, device):
     print_section("STEP 5: Building Model (Huber Loss)")
     
+    # Handle lstm_units as list or int
+    lstm_units = config['model'].get('lstm_units', 128)
+    if isinstance(lstm_units, list):
+        lstm_units = lstm_units[0]  # Use first value
+    
     model = LSTMModel(
         sequence_length=config['model']['sequence_length'],
         num_features=num_features,
         prediction_length=config['model']['prediction_length'],
-        lstm_units=config['model']['lstm_units'],
+        lstm_units=lstm_units,
         dropout_rate=config['model']['dropout_rate'],
         learning_rate=config['model']['learning_rate'],
         l2_reg=config['model'].get('l2_regularization', 0.0),
@@ -136,11 +155,17 @@ def step_5_build_model(config, num_features, device):
         huber_delta=0.5
     )
     
+    # Count parameters
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
     logger.info("Model built successfully")
     logger.info(f"Architecture: 2-layer LSTM with Huber loss")
-    logger.info(f"LSTM units: {config['model']['lstm_units']}")
+    logger.info(f"LSTM units: {lstm_units}")
     logger.info(f"Dropout: {config['model']['dropout_rate']}")
     logger.info(f"Loss: Huber (delta=0.5)")
+    logger.info(f"Total parameters: {total_params:,}")
+    logger.info(f"Trainable parameters: {trainable_params:,}")
     
     return model
 
@@ -219,7 +244,7 @@ def predict_in_batches(model, X, batch_size=4, device='cuda'):
     logger.info(f"Prediction complete")
     return np.concatenate(predictions, axis=0)
 
-def step_7_evaluate_model(model, X_test, y_test, config, device):
+def step_7_evaluate_model(model, X_test, y_test, config, device, feature_columns):
     print_section("STEP 7: Evaluating Model (Test Set)")
     
     evaluator = Evaluator(results_dir=config['paths']['results_dir'])
@@ -235,6 +260,26 @@ def step_7_evaluate_model(model, X_test, y_test, config, device):
     logger.info(f"Prediction std: {y_test_pred.std():.6f}")
     logger.info(f"Target std: {y_test.std():.6f}")
     logger.info(f"Variance ratio (pred/target): {y_test_pred.std() / (y_test.std() + 1e-8):.4f}")
+    
+    # Feature-specific analysis
+    logger.info("\n--- Feature-Specific Analysis ---")
+    volatility_5_idx = feature_columns.index('volatility_5') if 'volatility_5' in feature_columns else -1
+    volatility_20_idx = feature_columns.index('volatility_20') if 'volatility_20' in feature_columns else -1
+    returns_idx = feature_columns.index('returns') if 'returns' in feature_columns else 0
+    
+    if volatility_5_idx >= 0:
+        vol5_pred = y_test_pred[:, :, volatility_5_idx]
+        vol5_true = y_test[:, :, volatility_5_idx]
+        logger.info(f"volatility_5 - Pred std: {vol5_pred.std():.6f}, True std: {vol5_true.std():.6f}, Ratio: {vol5_pred.std() / (vol5_true.std() + 1e-8):.4f}")
+    
+    if volatility_20_idx >= 0:
+        vol20_pred = y_test_pred[:, :, volatility_20_idx]
+        vol20_true = y_test[:, :, volatility_20_idx]
+        logger.info(f"volatility_20 - Pred std: {vol20_pred.std():.6f}, True std: {vol20_true.std():.6f}, Ratio: {vol20_pred.std() / (vol20_true.std() + 1e-8):.4f}")
+    
+    returns_pred = y_test_pred[:, :, returns_idx]
+    returns_true = y_test[:, :, returns_idx]
+    logger.info(f"returns - Pred std: {returns_pred.std():.6f}, True std: {returns_true.std():.6f}, Ratio: {returns_pred.std() / (returns_true.std() + 1e-8):.4f}")
     
     evaluator.calculate_metrics(y_test, y_test_pred)
     evaluator.print_metrics_summary()
@@ -257,7 +302,10 @@ def step_8_summary(config, device):
     logger.info(f"Timeframe: {config['data']['timeframe']}")
     logger.info(f"Device: {device}")
     logger.info(f"Framework: PyTorch")
-    logger.info(f"Model: 2-Layer LSTM with {config['model']['lstm_units']} units")
+    lstm_units = config['model'].get('lstm_units', 128)
+    if isinstance(lstm_units, list):
+        lstm_units = lstm_units[0]
+    logger.info(f"Model: 2-Layer LSTM with {lstm_units} units")
     logger.info(f"Sequence Length: {config['model']['sequence_length']}")
     logger.info(f"Prediction Length: {config['model']['prediction_length']}")
     logger.info(f"Loss Function: Huber (delta=0.5)")
@@ -277,17 +325,17 @@ def main():
     
     print_section("BTC_15m Cryptocurrency Price Prediction System (PyTorch)")
     logger.info(f"Configuration loaded from config/config.yaml")
-    logger.info(f"Updates: StandardScaler + Huber Loss for improved variance capture")
+    logger.info(f"Updates: StandardScaler + Huber Loss + Enhanced Volatility Features")
     
     try:
         device = step_0_initialize_device(config)
         df = step_1_load_data(config)
-        normalized_data, scaler, feature_columns, processor = step_2_preprocess_data(df, config)
-        X, y = step_3_create_sequences(normalized_data, config)
+        normalized_data, scaler, feature_columns, processor, df_processed = step_2_preprocess_data(df, config)
+        X, y, seq_indices, df_with_ts = step_3_create_sequences(normalized_data, config, df_processed)
         X_train, X_val, X_test, y_train, y_val, y_test = step_4_split_data(X, y, config)
         model = step_5_build_model(config, len(feature_columns), device)
         model = step_6_train_model(model, X_train, y_train, X_val, y_val, config, device)
-        evaluator = step_7_evaluate_model(model, X_test, y_test, config, device)
+        evaluator = step_7_evaluate_model(model, X_test, y_test, config, device, feature_columns)
         step_8_summary(config, device)
         
         # Save scaler for later use in app
@@ -295,6 +343,13 @@ def main():
         with open(scaler_path, 'wb') as f:
             pickle.dump(scaler, f)
         logger.info(f"Scaler saved to {scaler_path}")
+        
+        # Save feature columns for later use
+        features_path = Path(config['paths']['model_dir']) / "feature_columns.pkl"
+        with open(features_path, 'wb') as f:
+            pickle.dump(feature_columns, f)
+        logger.info(f"Feature columns saved to {features_path}")
+        
         logger.info("Pipeline completed successfully!")
         
     except Exception as e:
