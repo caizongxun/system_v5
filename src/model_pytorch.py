@@ -215,7 +215,7 @@ class LSTMModel(nn.Module):
         mae = np.mean(np.abs(preds_flat - targets_flat))
         rmse = np.sqrt(np.mean((preds_flat - targets_flat) ** 2))
         
-        # R² score
+        # R2 score
         ss_res = np.sum((targets_flat - preds_flat) ** 2)
         ss_tot = np.sum((targets_flat - np.mean(targets_flat)) ** 2)
         r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
@@ -270,7 +270,7 @@ class LSTMModel(nn.Module):
                     f"Val Loss: {val_loss:.6f}, "
                     f"MAE: {val_mae:.6f}, "
                     f"RMSE: {val_rmse:.6f}, "
-                    f"R²: {val_r2:.4f}"
+                    f"R2_Score: {val_r2:.4f}"
                 )
             
             # Early stopping
