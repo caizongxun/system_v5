@@ -10,7 +10,7 @@ data:
 model:
   sequence_length: 100
   prediction_length: 15
-  lstm_units: [128, 64, 32]
+  lstm_units: [256, 128, 64]
   dropout_rate: 0.3
   batch_size: 8
   epochs: 100
