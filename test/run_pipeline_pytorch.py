@@ -189,7 +189,7 @@ def predict_in_batches(model, X, batch_size=4, device='cuda'):
     Args:
         model: Trained model
         X: Input data as numpy array
-        batch_size: Batch size for prediction (very small for memory efficiency)
+        batch_size: Batch size for prediction
         device: Device to use
         
     Returns:
@@ -214,8 +214,8 @@ def predict_in_batches(model, X, batch_size=4, device='cuda'):
             predictions.append(batch_pred.cpu().numpy())
         except RuntimeError as e:
             if "out of memory" in str(e).lower():
-                logger.warning(f"OOM at batch {i//batch_size}, trying with smaller batch")
-                # Try again with half the batch size
+                logger.warning(f"OOM at batch {i//batch_size}, trying with single samples")
+                # Try again with single sample prediction
                 for j in range(i, batch_end):
                     single = X_tensor[j:j+1].to(device)
                     with torch.no_grad():
@@ -236,28 +236,17 @@ def predict_in_batches(model, X, batch_size=4, device='cuda'):
     logger.info(f"Prediction complete")
     return np.concatenate(predictions, axis=0)
 
-def step_7_evaluate_model(model, X_train, y_train, X_val, y_val, X_test, y_test, config, device):
+def step_7_evaluate_model(model, X_test, y_test, config, device):
     """
-    Step 7: Evaluate model on all sets (with aggressive memory management)
+    Step 7: Evaluate model on test set only (memory efficient)
+    Note: Training and validation metrics are already tracked during training via early stopping
     """
-    print_section("STEP 7: Evaluating Model")
+    print_section("STEP 7: Evaluating Model (Test Set)")
     
     evaluator = Evaluator(results_dir=config['paths']['results_dir'])
     
-    # Use very small batch size for evaluation to avoid OOM
+    # Use small batch size for evaluation
     eval_batch_size = 4
-    
-    logger.info("Making predictions on training set...")
-    y_train_pred = predict_in_batches(model, X_train, batch_size=eval_batch_size, device=device)
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    
-    logger.info("Making predictions on validation set...")
-    y_val_pred = predict_in_batches(model, X_val, batch_size=eval_batch_size, device=device)
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
     
     logger.info("Making predictions on test set...")
     y_test_pred = predict_in_batches(model, X_test, batch_size=eval_batch_size, device=device)
@@ -265,15 +254,8 @@ def step_7_evaluate_model(model, X_train, y_train, X_val, y_val, X_test, y_test,
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     
-    logger.info("--- Training Set Metrics ---")
-    evaluator.calculate_metrics(y_train, y_train_pred)
-    
-    logger.info("--- Validation Set Metrics ---")
-    evaluator.calculate_metrics(y_val, y_val_pred)
-    
     logger.info("--- Test Set Metrics ---")
     evaluator.calculate_metrics(y_test, y_test_pred)
-    
     evaluator.print_metrics_summary()
     evaluator.save_metrics_report()
     
@@ -285,7 +267,7 @@ def step_7_evaluate_model(model, X_train, y_train, X_val, y_val, X_test, y_test,
     logger.info("Model evaluation completed")
     
     # Clean up memory
-    del y_train_pred, y_val_pred, y_test_pred
+    del y_test_pred
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -339,7 +321,7 @@ def main():
         
         model = step_6_train_model(model, X_train, y_train, X_val, y_val, config, device)
         
-        evaluator = step_7_evaluate_model(model, X_train, y_train, X_val, y_val, X_test, y_test, config, device)
+        evaluator = step_7_evaluate_model(model, X_test, y_test, config, device)
         
         step_8_summary(config, device)
         
