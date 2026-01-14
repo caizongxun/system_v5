@@ -57,91 +57,118 @@ class RollingPredictor:
     def generate_klines_from_prediction(
         self, 
         pred_denorm: np.ndarray,
-        last_candle: Dict,
         feature_columns: List[str],
         volatility_multiplier: float = 2.0
     ) -> List[Dict]:
         """
-        Convert predicted features to K-line OHLCV data with enhanced volatility
+        Convert predicted features to K-line OHLCV data.
+        Uses directly predicted prices (price_open, price_high, price_low, price_close, price_volume)
+        instead of reconstructing from indicators.
         
         Args:
             pred_denorm: (15, num_features) denormalized predictions
-            last_candle: Previous candle's OHLCV data
             feature_columns: List of feature names
-            volatility_multiplier: Multiplier to enhance visible volatility (default 2.0)
+            volatility_multiplier: Multiplier to enhance visible volatility (unused when using direct prices)
             
         Returns:
             List of 15 predicted candles
         """
         klines = []
-        current_time = last_candle['time'] + timedelta(minutes=15)
-        current_close = last_candle['close']
-        current_volume = last_candle['volume']
         
-        # Get feature indices
-        returns_idx = feature_columns.index('returns')
-        high_low_ratio_idx = feature_columns.index('high_low_ratio')
-        open_close_ratio_idx = feature_columns.index('open_close_ratio')
-        volume_ratio_idx = feature_columns.index('Volume_Ratio')
-        volatility_5_idx = feature_columns.index('volatility_5')
-        volatility_20_idx = feature_columns.index('volatility_20')
+        # Get feature indices for OHLCV prices
+        try:
+            price_open_idx = feature_columns.index('price_open')
+            price_high_idx = feature_columns.index('price_high')
+            price_low_idx = feature_columns.index('price_low')
+            price_close_idx = feature_columns.index('price_close')
+            price_volume_idx = feature_columns.index('price_volume')
+            has_prices = True
+        except ValueError:
+            has_prices = False
+            logger.warning("Price features not found in predictions. Using indicator-based reconstruction.")
         
-        for i in range(len(pred_denorm)):
-            pred_features = pred_denorm[i]
+        if has_prices:
+            # Use directly predicted prices
+            for i in range(len(pred_denorm)):
+                pred_features = pred_denorm[i]
+                
+                open_price = max(float(pred_features[price_open_idx]), 1.0)
+                high_price = max(float(pred_features[price_high_idx]), open_price)
+                low_price = min(float(pred_features[price_low_idx]), open_price)
+                close_price = float(pred_features[price_close_idx])
+                volume = max(float(pred_features[price_volume_idx]), 1000)
+                
+                # Ensure realistic OHLC relationships
+                high_price = max(high_price, max(open_price, close_price))
+                low_price = min(low_price, min(open_price, close_price))
+                
+                current_time = pd.to_datetime('now') + timedelta(minutes=15 * (i + 1))
+                
+                klines.append({
+                    'time': current_time,
+                    'open': float(open_price),
+                    'high': float(high_price),
+                    'low': float(low_price),
+                    'close': float(close_price),
+                    'volume': float(volume),
+                    'type': 'predicted',
+                    'step': i + 1
+                })
+        else:
+            # Fallback: reconstruct from indicators
+            logger.info("Using indicator-based K-line reconstruction as fallback.")
             
-            # Extract predicted features
-            returns = pred_features[returns_idx]
-            high_low_ratio = pred_features[high_low_ratio_idx]
-            open_close_ratio = pred_features[open_close_ratio_idx]
-            volume_ratio = pred_features[volume_ratio_idx]
-            volatility_5 = pred_features[volatility_5_idx]
-            volatility_20 = pred_features[volatility_20_idx]
+            try:
+                returns_idx = feature_columns.index('returns')
+                high_low_ratio_idx = feature_columns.index('high_low_ratio')
+                volume_ratio_idx = feature_columns.index('Volume_Ratio')
+                volatility_5_idx = feature_columns.index('volatility_5')
+            except ValueError:
+                logger.error("Required indicator columns not found.")
+                return []
             
-            # Smooth returns and volatility to ensure realistic K-bars
-            # Clamp extreme values to prevent unrealistic candles
-            returns_clamped = np.clip(returns, -0.05, 0.05)
-            volatility_smoothed = np.clip(max(abs(volatility_5), abs(volatility_20)), 0.001, 0.1)
+            current_close = 100.0  # Default reference price
+            current_volume = 10000  # Default volume
             
-            # Generate K-bar prices from predicted features
-            open_price = current_close
-            close_price = open_price * (1 + returns_clamped)
-            
-            # High-low ratio determines the height of the K-bar
-            range_size = abs(high_low_ratio) * max(abs(open_price), abs(close_price))
-            # Ensure minimum range for visibility
-            range_size = max(range_size, volatility_smoothed * open_price * volatility_multiplier)
-            
-            # Determine high and low based on close direction
-            if close_price > open_price:
-                # Green candle: close higher than open
-                high_price = max(open_price, close_price) + range_size * 0.3
-                low_price = min(open_price, close_price) - range_size * 0.1
-            else:
-                # Red candle: close lower than open
-                high_price = max(open_price, close_price) + range_size * 0.1
-                low_price = min(open_price, close_price) - range_size * 0.3
-            
-            # Ensure high >= close >= open >= low or high >= open >= close >= low
-            high_price = max(high_price, max(open_price, close_price))
-            low_price = min(low_price, min(open_price, close_price))
-            
-            # Volume prediction
-            volume = max(current_volume * np.clip(volume_ratio, 0.3, 3.0), 1000)
-            
-            klines.append({
-                'time': current_time,
-                'open': float(open_price),
-                'high': float(high_price),
-                'low': float(low_price),
-                'close': float(close_price),
-                'volume': float(volume),
-                'type': 'predicted',
-                'step': i + 1
-            })
-            
-            current_time += timedelta(minutes=15)
-            current_close = close_price
-            current_volume = volume
+            for i in range(len(pred_denorm)):
+                pred_features = pred_denorm[i]
+                
+                returns = np.clip(pred_features[returns_idx], -0.05, 0.05)
+                high_low_ratio = abs(pred_features[high_low_ratio_idx])
+                volume_ratio = np.clip(pred_features[volume_ratio_idx], 0.3, 3.0)
+                
+                open_price = current_close
+                close_price = open_price * (1 + returns)
+                range_size = high_low_ratio * max(abs(open_price), abs(close_price))
+                range_size = max(range_size, 0.01 * open_price)
+                
+                if close_price > open_price:
+                    high_price = max(open_price, close_price) + range_size * 0.3
+                    low_price = min(open_price, close_price) - range_size * 0.1
+                else:
+                    high_price = max(open_price, close_price) + range_size * 0.1
+                    low_price = min(open_price, close_price) - range_size * 0.3
+                
+                high_price = max(high_price, max(open_price, close_price))
+                low_price = min(low_price, min(open_price, close_price))
+                
+                volume = max(current_volume * volume_ratio, 1000)
+                
+                current_time = pd.to_datetime('now') + timedelta(minutes=15 * (i + 1))
+                
+                klines.append({
+                    'time': current_time,
+                    'open': float(open_price),
+                    'high': float(high_price),
+                    'low': float(low_price),
+                    'close': float(close_price),
+                    'volume': float(volume),
+                    'type': 'predicted',
+                    'step': i + 1
+                })
+                
+                current_close = close_price
+                current_volume = volume
         
         return klines
     
@@ -174,20 +201,9 @@ class RollingPredictor:
         pred_norm = self.predict_single_step(X_latest)
         pred_denorm = self.denormalize_prediction(pred_norm)
         
-        # Get last actual candle for reference
-        last_candle = {
-            'time': pd.to_datetime(df_original.iloc[-1]['open_time']),
-            'open': float(df_original.iloc[-1]['open']),
-            'high': float(df_original.iloc[-1]['high']),
-            'low': float(df_original.iloc[-1]['low']),
-            'close': float(df_original.iloc[-1]['close']),
-            'volume': float(df_original.iloc[-1]['volume'])
-        }
-        
         # Generate K-lines
         klines = self.generate_klines_from_prediction(
             pred_denorm,
-            last_candle,
             self.feature_columns
         )
         
@@ -216,18 +232,8 @@ class RollingPredictor:
         pred_norm = self.predict_single_step(X_baseline)
         pred_denorm = self.denormalize_prediction(pred_norm)
         
-        last_candle = {
-            'time': pd.to_datetime(df_original.iloc[-1]['open_time']),
-            'open': float(df_original.iloc[-1]['open']),
-            'high': float(df_original.iloc[-1]['high']),
-            'low': float(df_original.iloc[-1]['low']),
-            'close': float(df_original.iloc[-1]['close']),
-            'volume': float(df_original.iloc[-1]['volume'])
-        }
-        
         klines = self.generate_klines_from_prediction(
             pred_denorm,
-            last_candle,
             self.feature_columns,
             volatility_multiplier=volatility_multiplier
         )
