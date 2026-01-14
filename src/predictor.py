@@ -20,7 +20,7 @@ class RollingPredictor:
         """
         Args:
             model: Trained LSTM model
-            scaler: MinMaxScaler fitted on historical data
+            scaler: StandardScaler fitted on historical data
             feature_columns: List of feature names
             device: 'cuda' or 'cpu'
         """
@@ -86,14 +86,10 @@ class RollingPredictor:
         volatility_5_idx = feature_columns.index('volatility_5')
         volatility_20_idx = feature_columns.index('volatility_20')
         
-        # Calculate average volatility from predictions to inform range
-        avg_volatility_5 = np.mean([pred_denorm[i][volatility_5_idx] for i in range(len(pred_denorm))])
-        avg_volatility_20 = np.mean([pred_denorm[i][volatility_20_idx] for i in range(len(pred_denorm))])
-        
         for i in range(len(pred_denorm)):
             pred_features = pred_denorm[i]
             
-            # Extract key features
+            # Extract predicted features
             returns = pred_features[returns_idx]
             high_low_ratio = pred_features[high_low_ratio_idx]
             open_close_ratio = pred_features[open_close_ratio_idx]
@@ -101,40 +97,44 @@ class RollingPredictor:
             volatility_5 = pred_features[volatility_5_idx]
             volatility_20 = pred_features[volatility_20_idx]
             
-            # Reconstruct basic OHLCV
+            # Smooth returns and volatility to ensure realistic K-bars
+            # Clamp extreme values to prevent unrealistic candles
+            returns_clamped = np.clip(returns, -0.05, 0.05)
+            volatility_smoothed = np.clip(max(abs(volatility_5), abs(volatility_20)), 0.001, 0.1)
+            
+            # Generate K-bar prices from predicted features
             open_price = current_close
-            close_price = open_price * (1 + returns)
+            close_price = open_price * (1 + returns_clamped)
             
-            # Enhanced price range calculation
-            # Use both high_low_ratio and volatility features to determine range
-            base_range = abs(high_low_ratio) * close_price
-            volatility_range = max(volatility_5, volatility_20) * close_price * volatility_multiplier
-            price_range = max(base_range, volatility_range)
+            # High-low ratio determines the height of the K-bar
+            range_size = abs(high_low_ratio) * max(abs(open_price), abs(close_price))
+            # Ensure minimum range for visibility
+            range_size = max(range_size, volatility_smoothed * open_price * volatility_multiplier)
             
-            # Place high and low based on direction of returns
-            if returns > 0:
-                # Price went up: high is above close, low between open and close
-                high_price = max(open_price, close_price) + price_range * 0.6
-                low_price = min(open_price, close_price) - price_range * 0.4
+            # Determine high and low based on close direction
+            if close_price > open_price:
+                # Green candle: close higher than open
+                high_price = max(open_price, close_price) + range_size * 0.3
+                low_price = min(open_price, close_price) - range_size * 0.1
             else:
-                # Price went down: low is below close, high between open and close
-                high_price = max(open_price, close_price) + price_range * 0.4
-                low_price = min(open_price, close_price) - price_range * 0.6
+                # Red candle: close lower than open
+                high_price = max(open_price, close_price) + range_size * 0.1
+                low_price = min(open_price, close_price) - range_size * 0.3
             
-            # Ensure realistic bounds
+            # Ensure high >= close >= open >= low or high >= open >= close >= low
             high_price = max(high_price, max(open_price, close_price))
             low_price = min(low_price, min(open_price, close_price))
             
-            # Volume based on predicted ratio
-            volume = current_volume * max(0.5, volume_ratio)
+            # Volume prediction
+            volume = max(current_volume * np.clip(volume_ratio, 0.3, 3.0), 1000)
             
             klines.append({
                 'time': current_time,
-                'open': open_price,
-                'high': high_price,
-                'low': low_price,
-                'close': close_price,
-                'volume': volume,
+                'open': float(open_price),
+                'high': float(high_price),
+                'low': float(low_price),
+                'close': float(close_price),
+                'volume': float(volume),
                 'type': 'predicted',
                 'step': i + 1
             })
