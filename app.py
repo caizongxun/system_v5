@@ -245,7 +245,7 @@ def main():
         st.info("Generating predictions...")
         X_baseline = normalized_data[-100:]
         predicted_klines = predictor.predict_with_fixed_baseline(
-            X_baseline, df, volatility_multiplier=volatility_multiplier
+            X_baseline, df, pred_steps=config['model']['prediction_length'], volatility_multiplier=volatility_multiplier
         )
         st.success("Predictions generated!")
         
@@ -298,7 +298,7 @@ def main():
             for k in predicted_klines:
                 ret = (k['close'] - k['open']) / k['open']
                 pred_returns.append(ret)
-            pred_vol = np.std(pred_returns) * 100
+            pred_vol = np.std(pred_returns) * 100 if pred_returns else 0
             
             pred_range = max([k['high'] for k in predicted_klines]) - min([k['low'] for k in predicted_klines])
             
