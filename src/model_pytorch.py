@@ -19,7 +19,7 @@ class LSTMModel(nn.Module):
         sequence_length: int,
         num_features: int,
         prediction_length: int,
-        lstm_units: int = 128,
+        lstm_units = 128,
         dropout_rate: float = 0.0,
         learning_rate: float = 0.001,
         l2_reg: float = 0.0,
@@ -36,10 +36,19 @@ class LSTMModel(nn.Module):
         self.use_huber_loss = use_huber_loss
         self.huber_delta = huber_delta
         
+        # Handle lstm_units as either int or list
+        if isinstance(lstm_units, list):
+            lstm_units_list = lstm_units
+        else:
+            lstm_units_list = [lstm_units, lstm_units // 2]
+        
+        lstm_units_1 = lstm_units_list[0] if len(lstm_units_list) > 0 else 128
+        lstm_units_2 = lstm_units_list[1] if len(lstm_units_list) > 1 else lstm_units_1 // 2
+        
         # LSTM layers with stacking for better feature learning
         self.lstm1 = nn.LSTM(
             input_size=num_features,
-            hidden_size=lstm_units,
+            hidden_size=lstm_units_1,
             batch_first=True,
             dropout=dropout_rate if dropout_rate > 0 else 0
         )
@@ -47,8 +56,8 @@ class LSTMModel(nn.Module):
         self.dropout1 = nn.Dropout(dropout_rate)
         
         self.lstm2 = nn.LSTM(
-            input_size=lstm_units,
-            hidden_size=lstm_units // 2,
+            input_size=lstm_units_1,
+            hidden_size=lstm_units_2,
             batch_first=True,
             dropout=dropout_rate if dropout_rate > 0 else 0
         )
@@ -56,8 +65,8 @@ class LSTMModel(nn.Module):
         self.dropout2 = nn.Dropout(dropout_rate)
         
         # Dense layers for output prediction
-        self.fc1 = nn.Linear(lstm_units // 2, lstm_units // 2)
-        self.fc2 = nn.Linear(lstm_units // 2, num_features * prediction_length)
+        self.fc1 = nn.Linear(lstm_units_2, lstm_units_2)
+        self.fc2 = nn.Linear(lstm_units_2, num_features * prediction_length)
         
         self.relu = nn.ReLU()
         self.l2_reg = l2_reg
@@ -77,7 +86,7 @@ class LSTMModel(nn.Module):
         logger.info(
             f"LSTM Model initialized: seq_length={sequence_length}, "
             f"num_features={num_features}, pred_length={prediction_length}, "
-            f"lstm_units={lstm_units}"
+            f"lstm_units={lstm_units_1},{lstm_units_2}"
         )
     
     def forward(self, x):
