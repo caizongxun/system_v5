@@ -169,7 +169,7 @@ def step_6_train_model(model, X_train, y_train, X_val, y_val, config, device):
     train_loader = TorchDataLoader(train_dataset, batch_size=config['model']['batch_size'], shuffle=False)
     val_loader = TorchDataLoader(val_dataset, batch_size=config['model']['batch_size'], shuffle=False)
     
-    model.train(
+    model.train_model(
         train_loader, val_loader,
         epochs=config['model']['epochs'],
         device=device
