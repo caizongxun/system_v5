@@ -22,7 +22,7 @@ def step_1_load_data(config):
     
     loader = DataLoader(
         repo_id=config['data']['repo_id'],
-        cache_dir=config['paths']['data_dir']
+        cache_dir=Path(config['paths']['data_dir'])
     )
     
     df = loader.load_klines(
@@ -153,13 +153,13 @@ def step_7_evaluate_model(model, X_train, y_train, X_val, y_val, X_test, y_test,
     y_val_pred = model.predict(X_val)
     y_test_pred = model.predict(X_test)
     
-    logger.info("\n--- Training Set Metrics ---")
+    logger.info("--- Training Set Metrics ---")
     train_metrics = evaluator.calculate_metrics(y_train, y_train_pred)
     
-    logger.info("\n--- Validation Set Metrics ---")
+    logger.info("--- Validation Set Metrics ---")
     evaluator.calculate_metrics(y_val, y_val_pred)
     
-    logger.info("\n--- Test Set Metrics ---")
+    logger.info("--- Test Set Metrics ---")
     evaluator.calculate_metrics(y_test, y_test_pred)
     
     evaluator.print_metrics_summary()
