@@ -2,7 +2,7 @@ import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout, BatchNormalization
+from tensorflow.keras.layers import LSTM, Dense, Dropout, BatchNormalization, Reshape
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 import logging
@@ -50,7 +50,8 @@ class LSTMModel:
             Dense(64, activation='relu'),
             Dropout(self.dropout_rate),
             
-            Dense(self.prediction_length * self.num_features)
+            Dense(self.prediction_length * self.num_features),
+            Reshape((self.prediction_length, self.num_features))
         ])
         
         self.model.compile(
@@ -118,7 +119,7 @@ class LSTMModel:
             raise ValueError("Model not built yet. Call build() first.")
         
         predictions = self.model.predict(X)
-        return predictions.reshape(predictions.shape[0], self.prediction_length, self.num_features)
+        return predictions
     
     def save(self, model_path: str):
         """
