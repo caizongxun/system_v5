@@ -134,7 +134,8 @@ def step_5_build_model(config, num_features):
         prediction_length=config['model']['prediction_length'],
         lstm_units=config['model']['lstm_units'],
         dropout_rate=config['model']['dropout_rate'],
-        learning_rate=config['model']['learning_rate']
+        learning_rate=config['model']['learning_rate'],
+        l2_reg=config['model'].get('l2_regularization', 0.0)
     )
     
     model.build()
@@ -207,6 +208,8 @@ def step_8_summary(config, device_type):
     logger.info(f"Model: LSTM with {config['model']['lstm_units']} units")
     logger.info(f"Sequence Length: {config['model']['sequence_length']}")
     logger.info(f"Prediction Length: {config['model']['prediction_length']}")
+    logger.info(f"L2 Regularization: {config['model'].get('l2_regularization', 0.0)}")
+    logger.info(f"Dropout Rate: {config['model']['dropout_rate']}")
     logger.info(f"\nResults saved to: {config['paths']['results_dir']}")
     logger.info(f"Model saved to: {config['paths']['model_dir']}")
     logger.info(f"Logs saved to: {config['paths']['logs_dir']}")
