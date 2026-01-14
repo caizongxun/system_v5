@@ -417,8 +417,13 @@ def main():
     except Exception as e:
         logger.exception(f"Error: {str(e)}")
         st.error(f"❌ {str(e)}")
-        st.info("Check:
-- test/models/btc_15m_model_pytorch.pt\n- test/models/btc_15m_scaler.pkl\n- config/config.yaml\n- Internet connection")
+        st.info("""
+        Troubleshooting:
+        - test/models/btc_15m_model_pytorch.pt
+        - test/models/btc_15m_scaler.pkl
+        - config/config.yaml
+        - Internet connection for Binance API
+        """)
 
 if __name__ == "__main__":
     main()
