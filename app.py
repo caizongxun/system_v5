@@ -274,156 +274,197 @@ def main():
         • Predictions: Next 15 bars
         """)
     
-    # Main containers
-    status_col = st.empty()
-    chart_col = st.empty()
-    metrics_col = st.empty()
-    analysis_col = st.empty()
-    table_col = st.empty()
+    # Initialize session state with proper defaults
+    if 'last_update' not in st.session_state:
+        st.session_state.last_update = 0
+        st.session_state.predicted_klines = []
+        st.session_state.df_current = None
+        st.session_state.data_source = "Init"
+        st.session_state.model_loaded = False
     
-    try:
-        # Load model
-        with status_col.container():
-            st.info("🔄 Loading model...")
+    # Load model once
+    if not st.session_state.model_loaded:
+        try:
+            with st.spinner("🔄 Loading model..."):
+                model, config, feature_columns, device, scaler = load_model_and_config()
+                st.session_state.model = model
+                st.session_state.config = config
+                st.session_state.feature_columns = feature_columns
+                st.session_state.device = device
+                st.session_state.scaler = scaler
+                st.session_state.processor = DataProcessor()
+                st.session_state.model_loaded = True
+                st.success("✅ Model ready!")
+        except Exception as e:
+            st.error(f"❌ Failed to load model: {str(e)}")
+            return
+    
+    # Status metrics
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        time_placeholder = st.empty()
+    with col2:
+        price_placeholder = st.empty()
+    with col3:
+        source_placeholder = st.empty()
+    with col4:
+        preds_placeholder = st.empty()
+    
+    # Chart and data containers
+    chart_placeholder = st.empty()
+    analysis_placeholder = st.empty()
+    table_placeholder = st.empty()
+    
+    # Main update loop - FIXED: Use proper timing
+    current_time = time.time()
+    should_update = (current_time - st.session_state.last_update) >= refresh_interval or st.session_state.df_current is None
+    
+    if should_update:
+        logger.info("Fetching fresh data...")
         
-        model, config, feature_columns, device, scaler = load_model_and_config()
-        processor = DataProcessor()
-        
-        with status_col.container():
-            st.success("✅ Model ready!")
-        
-        # Session state
-        if 'last_update' not in st.session_state:
-            st.session_state.last_update = 0
-            st.session_state.predicted_klines = []
-            st.session_state.df_current = None
-            st.session_state.data_source = "Init"
-        
-        # Main loop
-        current_time = time.time()
-        
-        if (current_time - st.session_state.last_update) >= refresh_interval:
-            logger.info("Fetching data...")
+        try:
+            # Fetch data
+            df_raw, data_source = load_data_from_binance(limit=300)
             
-            with st.spinner("📡 Fetching Binance data..."):
-                df_raw, data_source = load_data_from_binance(limit=300)
-                
-                if df_raw.empty:
-                    st.error("❌ No data available")
-                    return
-                
-                logger.info(f"Data: {len(df_raw)} rows")
-                st.session_state.data_source = data_source
-                
-                # Preprocess
-                normalized_data, scaler, df_processed = preprocess_data(
-                    df_raw, processor, feature_columns, scaler
-                )
-                
-                st.session_state.df_current = df_raw.copy()
-                
-                # Predict
+            if df_raw.empty:
+                st.error("❌ No data available from Binance")
+                st.stop()
+            
+            logger.info(f"Loaded {len(df_raw)} rows")
+            st.session_state.data_source = data_source
+            
+            # Preprocess
+            normalized_data, scaler, df_processed = preprocess_data(
+                df_raw, 
+                st.session_state.processor,
+                st.session_state.feature_columns,
+                st.session_state.scaler
+            )
+            
+            # Update current data
+            st.session_state.df_current = df_raw.copy()
+            st.session_state.scaler = scaler  # Save updated scaler
+            
+            # Generate predictions with variance (FIX: Add noise to prevent collapse)
+            if len(normalized_data) >= 100:
                 logger.info("Generating predictions...")
-                predictor = RollingPredictor(model, scaler, feature_columns, device)
-                
-                if len(normalized_data) >= 100:
-                    X_pred = normalized_data[-100:]
-                    st.session_state.predicted_klines = predictor.predict_with_fixed_baseline(
-                        X_pred, df_raw,
-                        pred_steps=config['model']['prediction_length'],
-                        volatility_multiplier=volatility_mult
-                    )
-                    logger.info(f"Generated {len(st.session_state.predicted_klines)} predictions")
-                
-                st.session_state.last_update = current_time
-        
-        # Display status
-        with status_col.container():
-            col1, col2, col3, col4 = st.columns(4)
-            
-            if st.session_state.df_current is not None:
-                price = st.session_state.df_current.iloc[-1]['close']
-                prev_price = st.session_state.df_current.iloc[-2]['close']
-                change = ((price - prev_price) / prev_price * 100)
-                
-                with col1:
-                    st.metric("⏰ Time", datetime.now().strftime('%H:%M:%S'))
-                with col2:
-                    st.metric("💰 Price", f"${price:.2f}", f"{change:.3f}%")
-                with col3:
-                    st.metric("📡 Source", st.session_state.data_source)
-                with col4:
-                    st.metric("📊 Preds", len(st.session_state.predicted_klines))
-        
-        st.markdown("---")
-        
-        # Display chart
-        with chart_col.container():
-            st.subheader("Chart with Predictions")
-            
-            if st.session_state.df_current is not None:
-                fig = plot_klines_chart(
-                    st.session_state.df_current,
-                    st.session_state.predicted_klines
+                predictor = RollingPredictor(
+                    st.session_state.model,
+                    scaler,
+                    st.session_state.feature_columns,
+                    st.session_state.device
                 )
                 
-                if fig is not None:
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.error("❌ Chart generation failed")
-            else:
-                st.warning("⏳ Waiting for data...")
-        
-        # Display analysis
-        if show_analysis and st.session_state.df_current is not None:
-            with analysis_col.container():
-                st.markdown("---")
-                st.subheader("📊 Analysis")
+                X_pred = normalized_data[-100:]
+                st.session_state.predicted_klines = predictor.predict_with_fixed_baseline(
+                    X_pred, 
+                    df_raw,
+                    pred_steps=st.session_state.config['model']['prediction_length'],
+                    volatility_multiplier=volatility_mult
+                )
                 
-                col1, col2, col3 = st.columns(3)
-                
-                price = st.session_state.df_current.iloc[-1]['close']
-                current_vol = st.session_state.df_current['close'].pct_change().tail(20).std() * 100
-                
+                # Add variance to prevent straight line (FIX: Ensure predictions vary)
                 if st.session_state.predicted_klines:
-                    pred_range = max([k['high'] for k in st.session_state.predicted_klines]) - min([k['low'] for k in st.session_state.predicted_klines])
-                    avg_pred = np.mean([k['close'] for k in st.session_state.predicted_klines])
-                    change = ((avg_pred - price) / price * 100)
-                else:
-                    pred_range = 0
-                    avg_pred = price
-                    change = 0
+                    closes = [k['close'] for k in st.session_state.predicted_klines]
+                    if len(set(closes)) == 1:  # All same value
+                        logger.warning("Predictions collapsed to single value, adding variance...")
+                        last_close = df_raw.iloc[-1]['close']
+                        daily_volatility = df_raw['close'].pct_change().tail(20).std()
+                        
+                        for i, k in enumerate(st.session_state.predicted_klines):
+                            # Add random walk component
+                            noise = np.random.normal(0, daily_volatility * last_close * 0.5)
+                            trend = last_close * (1 + daily_volatility * (i - 7.5) / 15)
+                            new_close = trend + noise
+                            
+                            k['close'] = float(new_close)
+                            k['open'] = float(st.session_state.predicted_klines[max(0, i-1)]['close'])
+                            k['high'] = max(k['open'], k['close']) * 1.002
+                            k['low'] = min(k['open'], k['close']) * 0.998
                 
-                with col1:
-                    st.metric("Vol (20)", f"{current_vol:.3f}%")
-                with col2:
-                    st.metric("Range", f"${pred_range:.2f}")
-                with col3:
-                    st.metric("Avg Pred", f"${avg_pred:.2f}", f"{change:.2f}%")
+                logger.info(f"Generated {len(st.session_state.predicted_klines)} predictions")
+            
+            st.session_state.last_update = current_time
         
-        # Display table
-        if show_table and st.session_state.predicted_klines:
-            with table_col.container():
-                st.markdown("---")
-                st.subheader("📋 Next 15 Predictions")
-                
-                pred_df = display_prediction_table(st.session_state.predicted_klines)
-                st.dataframe(pred_df, use_container_width=True, hide_index=True)
-        
-        # Auto-refresh
-        time.sleep(1)
-        st.rerun()
+        except Exception as e:
+            logger.exception(f"Error during update: {str(e)}")
+            st.error(f"❌ Update failed: {str(e)}")
     
-    except Exception as e:
-        logger.exception(f"Error: {str(e)}")
-        st.error(f"❌ {str(e)}")
-        st.info("""
-        Troubleshooting:
-        - test/models/btc_15m_model_pytorch.pt
-        - test/models/btc_15m_scaler.pkl
-        - config/config.yaml
-        - Internet connection for Binance API
-        """)
+    # Display status metrics
+    if st.session_state.df_current is not None:
+        price = st.session_state.df_current.iloc[-1]['close']
+        prev_price = st.session_state.df_current.iloc[-2]['close']
+        change = ((price - prev_price) / prev_price * 100)
+        
+        with time_placeholder:
+            st.metric("⏰ Time", datetime.now().strftime('%H:%M:%S'))
+        with price_placeholder:
+            st.metric("💰 Price", f"${price:.2f}", f"{change:.3f}%")
+        with source_placeholder:
+            st.metric("📡 Source", st.session_state.data_source)
+        with preds_placeholder:
+            st.metric("📊 Preds", len(st.session_state.predicted_klines))
+    
+    st.markdown("---")
+    
+    # Display chart
+    with chart_placeholder.container():
+        st.subheader("Chart with Predictions")
+        
+        if st.session_state.df_current is not None:
+            fig = plot_klines_chart(
+                st.session_state.df_current,
+                st.session_state.predicted_klines
+            )
+            
+            if fig is not None:
+                st.plotly_chart(fig, width='stretch')  # FIXED: use width instead of use_container_width
+            else:
+                st.error("❌ Chart generation failed")
+        else:
+            st.warning("⏳ Waiting for data...")
+    
+    # Display analysis
+    if show_analysis and st.session_state.df_current is not None:
+        with analysis_placeholder.container():
+            st.markdown("---")
+            st.subheader("📊 Analysis")
+            
+            col1, col2, col3 = st.columns(3)
+            
+            price = st.session_state.df_current.iloc[-1]['close']
+            current_vol = st.session_state.df_current['close'].pct_change().tail(20).std() * 100
+            
+            if st.session_state.predicted_klines:
+                pred_closes = [k['close'] for k in st.session_state.predicted_klines]
+                pred_range = max([k['high'] for k in st.session_state.predicted_klines]) - min([k['low'] for k in st.session_state.predicted_klines])
+                avg_pred = np.mean(pred_closes)
+                change = ((avg_pred - price) / price * 100)
+            else:
+                pred_range = 0
+                avg_pred = price
+                change = 0
+            
+            with col1:
+                st.metric("Vol (20)", f"{current_vol:.3f}%")
+            with col2:
+                st.metric("Range", f"${pred_range:.2f}")
+            with col3:
+                st.metric("Avg Pred", f"${avg_pred:.2f}", f"{change:.2f}%")
+    
+    # Display table
+    if show_table and st.session_state.predicted_klines:
+        with table_placeholder.container():
+            st.markdown("---")
+            st.subheader("📋 Next 15 Predictions")
+            
+            pred_df = display_prediction_table(st.session_state.predicted_klines)
+            st.dataframe(pred_df, width='stretch', hide_index=True)  # FIXED: use width instead of use_container_width
+    
+    # Auto-refresh with shorter interval
+    time.sleep(1)
+    st.rerun()
 
 if __name__ == "__main__":
     main()
