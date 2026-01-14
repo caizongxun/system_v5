@@ -132,7 +132,7 @@ def step_5_build_model(config, num_features, device):
         learning_rate=config['model']['learning_rate'],
         l2_reg=config['model'].get('l2_regularization', 0.0),
         device=device,
-        use_huber_loss=True,  # Use Huber loss instead of MSE
+        use_huber_loss=True,
         huber_delta=0.5
     )
     
@@ -179,7 +179,7 @@ def step_6_train_model(model, X_train, y_train, X_val, y_val, config, device):
     
     model_path = Path(config['paths']['model_dir']) / "btc_15m_model_pytorch.pt"
     model.save(str(model_path))
-    logger.info(f"Model saved to {model_path}")
+    logger.info(f"Model weights saved to {model_path}")
     
     return model
 
@@ -264,7 +264,7 @@ def step_8_summary(config, device):
     logger.info(f"Normalization: StandardScaler (Z-score)")
     logger.info(f"L2 Regularization: {config['model'].get('l2_regularization', 0.0)}")
     logger.info(f"Dropout Rate: {config['model']['dropout_rate']}")
-    logger.info(f"\nResults saved to: {config['paths']['results_dir']}")
+    logger.info(f"Results saved to: {config['paths']['results_dir']}")
     logger.info(f"Model saved to: {config['paths']['model_dir']}")
     logger.info(f"Logs saved to: {config['paths']['logs_dir']}")
 
@@ -295,8 +295,7 @@ def main():
         with open(scaler_path, 'wb') as f:
             pickle.dump(scaler, f)
         logger.info(f"Scaler saved to {scaler_path}")
-        
-        logger.info("\nPipeline completed successfully!")
+        logger.info("Pipeline completed successfully!")
         
     except Exception as e:
         logger.error(f"Pipeline failed with error: {str(e)}", exc_info=True)
