@@ -6,6 +6,7 @@ import logging
 import torch
 from torch.utils.data import TensorDataset, DataLoader as TorchDataLoader
 import gc
+import pickle
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -58,7 +59,7 @@ def step_1_load_data(config):
     return df
 
 def step_2_preprocess_data(df, config):
-    print_section("STEP 2: Preprocessing Data")
+    print_section("STEP 2: Preprocessing Data (StandardScaler + Huber Loss)")
     
     processor = DataProcessor()
     
@@ -68,14 +69,18 @@ def step_2_preprocess_data(df, config):
     feature_columns = config['features'].get('selected_features', [
         'returns', 'high_low_ratio', 'open_close_ratio', 
         'price_to_sma_10', 'price_to_sma_20', 'volatility_20',
-        'RSI', 'MACD', 'MACD_Signal', 'BB_Position', 'Volume_Ratio'
+        'volatility_5', 'momentum_5', 'momentum_10', 'ATR',
+        'RSI', 'MACD', 'MACD_Signal', 'BB_Position', 'Volume_Ratio',
+        'returns_std_5'
     ])
     
     logger.info(f"Using {len(feature_columns)} features: {feature_columns}")
     
+    # Use StandardScaler instead of MinMaxScaler for better variance preservation
     normalized_data, scaler = processor.normalize_features(df, feature_columns)
     
-    logger.info(f"Data normalized. Shape: {normalized_data.shape}")
+    logger.info(f"Data normalized using StandardScaler (Z-score).")
+    logger.info(f"Normalized shape: {normalized_data.shape}")
     
     return normalized_data, scaler, feature_columns, processor
 
@@ -89,6 +94,7 @@ def step_3_create_sequences(normalized_data, config):
     X, y = processor.create_sequences(normalized_data, seq_length, pred_length)
     
     logger.info(f"Sequences created: X shape {X.shape}, y shape {y.shape}")
+    logger.info(f"Sample target returns std: {y[:, :, 0].std():.6f}")
     
     return X, y
 
@@ -115,7 +121,7 @@ def step_4_split_data(X, y, config):
     return X_train, X_val, X_test, y_train, y_val, y_test
 
 def step_5_build_model(config, num_features, device):
-    print_section("STEP 5: Building Model")
+    print_section("STEP 5: Building Model (Huber Loss)")
     
     model = LSTMModel(
         sequence_length=config['model']['sequence_length'],
@@ -125,11 +131,16 @@ def step_5_build_model(config, num_features, device):
         dropout_rate=config['model']['dropout_rate'],
         learning_rate=config['model']['learning_rate'],
         l2_reg=config['model'].get('l2_regularization', 0.0),
-        device=device
+        device=device,
+        use_huber_loss=True,  # Use Huber loss instead of MSE
+        huber_delta=0.5
     )
     
     logger.info("Model built successfully")
-    logger.info(model.get_summary())
+    logger.info(f"Architecture: 2-layer LSTM with Huber loss")
+    logger.info(f"LSTM units: {config['model']['lstm_units']}")
+    logger.info(f"Dropout: {config['model']['dropout_rate']}")
+    logger.info(f"Loss: Huber (delta=0.5)")
     
     return model
 
@@ -144,18 +155,27 @@ def step_6_train_model(model, X_train, y_train, X_val, y_val, config, device):
     train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
     val_dataset = TensorDataset(X_val_tensor, y_val_tensor)
     
-    train_loader = TorchDataLoader(train_dataset, batch_size=config['model']['batch_size'], shuffle=False)
-    val_loader = TorchDataLoader(val_dataset, batch_size=config['model']['batch_size'], shuffle=False)
+    train_loader = TorchDataLoader(train_dataset, batch_size=config['training']['batch_size'], shuffle=False)
+    val_loader = TorchDataLoader(val_dataset, batch_size=config['training']['batch_size'], shuffle=False)
     
-    model.train_model(
-        train_loader, val_loader,
-        epochs=config['model']['epochs'],
-        device=device
+    logger.info(f"Training parameters:")
+    logger.info(f"  Epochs: {config['training']['epochs']}")
+    logger.info(f"  Batch size: {config['training']['batch_size']}")
+    logger.info(f"  Learning rate: {config['model']['learning_rate']}")
+    logger.info(f"  Loss function: Huber")
+    logger.info(f"  Normalization: StandardScaler")
+    
+    model.fit(
+        X_train, y_train,
+        X_val, y_val,
+        epochs=config['training']['epochs'],
+        batch_size=config['training']['batch_size'],
+        verbose=True
     )
     
     model_path = Path(config['paths']['model_dir']) / "btc_15m_model_pytorch.pt"
     model.save(str(model_path))
-    logger.info(f"Model training completed and saved")
+    logger.info(f"Model saved to {model_path}")
     
     return model
 
@@ -166,31 +186,31 @@ def predict_in_batches(model, X, batch_size=4, device='cuda'):
     
     logger.info(f"Predicting {total_samples} samples with batch_size={batch_size}")
     
-    for i in range(0, total_samples, batch_size):
-        batch_end = min(i + batch_size, total_samples)
-        batch = X_tensor[i:batch_end].to(device)
-        
-        try:
-            with torch.no_grad():
+    model.eval()
+    with torch.no_grad():
+        for i in range(0, total_samples, batch_size):
+            batch_end = min(i + batch_size, total_samples)
+            batch = X_tensor[i:batch_end].to(device)
+            
+            try:
                 batch_pred = model(batch)
-            predictions.append(batch_pred.cpu().numpy())
-        except RuntimeError as e:
-            if "out of memory" in str(e).lower():
-                logger.warning(f"OOM at batch {i//batch_size}, trying with single samples")
-                for j in range(i, batch_end):
-                    single = X_tensor[j:j+1].to(device)
-                    with torch.no_grad():
+                predictions.append(batch_pred.cpu().numpy())
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower():
+                    logger.warning(f"OOM at batch {i//batch_size}, trying with single samples")
+                    for j in range(i, batch_end):
+                        single = X_tensor[j:j+1].to(device)
                         pred = model(single)
-                    predictions.append(pred.cpu().numpy())
-            else:
-                raise
-        
-        del batch
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        
-        if (i // batch_size + 1) % 100 == 0:
-            logger.info(f"Processed {min(i + batch_size, total_samples)}/{total_samples} samples")
+                        predictions.append(pred.cpu().numpy())
+                else:
+                    raise
+            
+            del batch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            if (i // batch_size + 1) % 100 == 0:
+                logger.info(f"Processed {min(i + batch_size, total_samples)}/{total_samples} samples")
     
     logger.info(f"Prediction complete")
     return np.concatenate(predictions, axis=0)
@@ -208,14 +228,13 @@ def step_7_evaluate_model(model, X_test, y_test, config, device):
         torch.cuda.empty_cache()
     
     logger.info("--- Test Set Metrics ---")
+    logger.info(f"Prediction std: {y_test_pred.std():.6f}")
+    logger.info(f"Target std: {y_test.std():.6f}")
+    logger.info(f"Variance ratio (pred/target): {y_test_pred.std() / (y_test.std() + 1e-8):.4f}")
+    
     evaluator.calculate_metrics(y_test, y_test_pred)
     evaluator.print_metrics_summary()
     evaluator.save_metrics_report()
-    
-    if model.history is not None:
-        evaluator.plot_training_history(model.history)
-    
-    evaluator.plot_predictions(y_test, y_test_pred, sample_idx=0)
     
     logger.info("Model evaluation completed")
     
@@ -234,9 +253,11 @@ def step_8_summary(config, device):
     logger.info(f"Timeframe: {config['data']['timeframe']}")
     logger.info(f"Device: {device}")
     logger.info(f"Framework: PyTorch")
-    logger.info(f"Model: LSTM with {config['model']['lstm_units']} units")
+    logger.info(f"Model: 2-Layer LSTM with {config['model']['lstm_units']} units")
     logger.info(f"Sequence Length: {config['model']['sequence_length']}")
     logger.info(f"Prediction Length: {config['model']['prediction_length']}")
+    logger.info(f"Loss Function: Huber (delta=0.5)")
+    logger.info(f"Normalization: StandardScaler (Z-score)")
     logger.info(f"L2 Regularization: {config['model'].get('l2_regularization', 0.0)}")
     logger.info(f"Dropout Rate: {config['model']['dropout_rate']}")
     logger.info(f"\nResults saved to: {config['paths']['results_dir']}")
@@ -252,6 +273,7 @@ def main():
     
     print_section("BTC_15m Cryptocurrency Price Prediction System (PyTorch)")
     logger.info(f"Configuration loaded from config/config.yaml")
+    logger.info(f"Updates: StandardScaler + Huber Loss for improved variance capture")
     
     try:
         device = step_0_initialize_device(config)
@@ -263,6 +285,13 @@ def main():
         model = step_6_train_model(model, X_train, y_train, X_val, y_val, config, device)
         evaluator = step_7_evaluate_model(model, X_test, y_test, config, device)
         step_8_summary(config, device)
+        
+        # Save scaler for later use in app
+        scaler_path = Path(config['paths']['model_dir']) / "btc_15m_scaler.pkl"
+        with open(scaler_path, 'wb') as f:
+            pickle.dump(scaler, f)
+        logger.info(f"Scaler saved to {scaler_path}")
+        
         logger.info("\nPipeline completed successfully!")
         
     except Exception as e:
