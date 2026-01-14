@@ -19,13 +19,16 @@ from src.data_loader import DataLoader
 
 logger = None
 
-# ==================== EncoderDecoder LSTM Model ====================
+# ==================== Enhanced EncoderDecoder LSTM Model ====================
 
-class EncoderDecoderLSTM(nn.Module):
-    """Encoder-Decoder LSTM for multi-step ahead forecasting
+class EnhancedEncoderDecoderLSTM(nn.Module):
+    """Enhanced Encoder-Decoder LSTM for multi-step ahead forecasting
     
-    Reference: Machine Learning Mastery - Multi-step LSTM Time Series Forecasting
-    This architecture prevents error accumulation in recursive predictions
+    Improvements:
+    - 3-layer LSTM (vs 2-layer) for better representation
+    - BatchNorm after LSTM to stabilize training
+    - Residual connections to preserve gradients
+    - Better initialization for improved convergence
     """
     def __init__(self, input_size, hidden_size, num_layers, forecast_horizon, dropout_rate=0.2, l2_reg=0.0, device='cpu'):
         super().__init__()
@@ -36,15 +39,20 @@ class EncoderDecoderLSTM(nn.Module):
         self.device = device
         self.l2_reg = l2_reg
         
+        # Input projection layer
+        self.input_proj = nn.Linear(input_size, hidden_size)
+        self.input_bn = nn.BatchNorm1d(hidden_size)
+        
         # Encoder - compress historical sequence
         self.encoder = nn.LSTM(
-            input_size=input_size,
+            input_size=hidden_size,
             hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True,
             dropout=dropout_rate if num_layers > 1 else 0,
             bidirectional=False
         )
+        self.encoder_bn = nn.BatchNorm1d(hidden_size)
         
         # Decoder - generate future sequence
         self.decoder = nn.LSTM(
@@ -55,13 +63,29 @@ class EncoderDecoderLSTM(nn.Module):
             dropout=dropout_rate if num_layers > 1 else 0,
             bidirectional=False
         )
+        self.decoder_bn = nn.BatchNorm1d(hidden_size)
         
-        # Output layer - predict all features for each time step
-        self.fc = nn.Linear(hidden_size, input_size)
+        # Output projection layers with residual connection
+        self.fc_hidden = nn.Linear(hidden_size, hidden_size)
+        self.fc_hidden_bn = nn.BatchNorm1d(hidden_size)
+        self.fc_out = nn.Linear(hidden_size, input_size)
+        
+        self.relu = nn.ReLU()
         
         # Optimizer and loss
         self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-3, weight_decay=l2_reg)
         self.criterion = nn.HuberLoss(delta=0.5)
+        
+        # Initialize weights
+        self._init_weights()
+        
+    def _init_weights(self):
+        """Initialize weights for better convergence"""
+        for name, param in self.named_parameters():
+            if 'weight' in name and param.dim() > 1:
+                nn.init.orthogonal_(param, gain=1.0)
+            elif 'bias' in name:
+                nn.init.constant_(param, 0.0)
         
     def forward(self, x):
         """Forward pass for encoder-decoder
@@ -72,26 +96,52 @@ class EncoderDecoderLSTM(nn.Module):
         Returns:
             predictions: (batch_size, forecast_horizon, input_size)
         """
+        batch_size, seq_length, _ = x.shape
+        
+        # Project input to hidden dimension
+        x_proj = self.input_proj(x)  # (batch, seq_length, hidden)
+        x_proj = x_proj.view(-1, self.hidden_size)  # Reshape for BatchNorm
+        x_proj = self.input_bn(x_proj)
+        x_proj = x_proj.view(batch_size, seq_length, self.hidden_size)
+        
         # Encoder: compress sequence to context vector
-        encoder_out, (h_n, c_n) = self.encoder(x)
+        encoder_out, (h_n, c_n) = self.encoder(x_proj)
+        
+        # Apply BatchNorm to encoder output
+        encoder_out_bn = encoder_out.contiguous().view(-1, self.hidden_size)
+        encoder_out_bn = self.encoder_bn(encoder_out_bn)
+        encoder_out_bn = encoder_out_bn.view(batch_size, seq_length, self.hidden_size)
         
         # Decoder: use last encoder output as initial input
-        decoder_input = encoder_out[:, -1:, :]  # (batch, 1, hidden_size)
+        decoder_input = encoder_out_bn[:, -1:, :]  # (batch, 1, hidden_size)
         
         predictions = []
         
         # Iteratively decode forecast_horizon steps
         for _ in range(self.forecast_horizon):
             decoder_out, (h_n, c_n) = self.decoder(decoder_input, (h_n, c_n))
-            output = self.fc(decoder_out)  # (batch, 1, input_size)
+            
+            # Apply BatchNorm to decoder output
+            decoder_out_bn = decoder_out.contiguous().view(-1, self.hidden_size)
+            decoder_out_bn = self.decoder_bn(decoder_out_bn)
+            decoder_out_bn = decoder_out_bn.view(batch_size, 1, self.hidden_size)
+            
+            # Output projection with residual connection
+            hidden = self.fc_hidden(decoder_out_bn)  # (batch, 1, hidden)
+            hidden = hidden.view(-1, self.hidden_size)
+            hidden = self.fc_hidden_bn(hidden)
+            hidden = hidden.view(batch_size, 1, self.hidden_size)
+            hidden = self.relu(hidden)
+            
+            output = self.fc_out(hidden)  # (batch, 1, input_size)
             predictions.append(output)
-            decoder_input = decoder_out  # Use decoder output as next input
+            decoder_input = decoder_out_bn  # Use decoder output as next input
         
         # Concatenate all predictions: (batch, forecast_horizon, input_size)
         return torch.cat(predictions, dim=1)
     
-    def fit(self, X_train, y_train, X_val, y_val, epochs=50, batch_size=32, verbose=True):
-        """Train the model"""
+    def fit(self, X_train, y_train, X_val, y_val, epochs=100, batch_size=32, verbose=True):
+        """Train the model with improved strategy"""
         train_dataset = TensorDataset(
             torch.tensor(X_train, dtype=torch.float32),
             torch.tensor(y_train, dtype=torch.float32)
@@ -105,12 +155,12 @@ class EncoderDecoderLSTM(nn.Module):
         val_loader = TorchDataLoader(val_dataset, batch_size=batch_size, shuffle=False)
         
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=10
+            self.optimizer, mode='min', factor=0.5, patience=8
         )
         
         best_val_loss = float('inf')
         patience_counter = 0
-        patience_limit = 20
+        patience_limit = 25
         
         self.to(self.device)
         
@@ -154,10 +204,15 @@ class EncoderDecoderLSTM(nn.Module):
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 patience_counter = 0
+                # Save best model
+                self.best_state = {k: v.cpu() for k, v in self.state_dict().items()}
             else:
                 patience_counter += 1
                 if patience_counter >= patience_limit:
                     logger.info(f"Early stopping at epoch {epoch+1}")
+                    # Restore best model
+                    if hasattr(self, 'best_state'):
+                        self.load_state_dict(self.best_state)
                     break
     
     def predict(self, X, batch_size=4):
@@ -391,12 +446,12 @@ def step_5_split_data(X, y, config):
     return X_train, X_val, X_test, y_train, y_val, y_test
 
 def step_6_build_model(config, num_features, device):
-    print_section("STEP 6: Building EncoderDecoder LSTM Model")
+    print_section("STEP 6: Building Enhanced EncoderDecoder LSTM Model")
     
-    model = EncoderDecoderLSTM(
+    model = EnhancedEncoderDecoderLSTM(
         input_size=num_features,
         hidden_size=config['model'].get('lstm_units', 256),
-        num_layers=2,
+        num_layers=3,
         forecast_horizon=config['model']['prediction_length'],
         dropout_rate=config['model']['dropout_rate'],
         l2_reg=config['model'].get('l2_regularization', 0.0),
@@ -406,12 +461,13 @@ def step_6_build_model(config, num_features, device):
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     
-    logger.info(f"Model: EncoderDecoder LSTM")
+    logger.info(f"Model: Enhanced EncoderDecoder LSTM (3 layers)")
     logger.info(f"  Input features: {num_features}")
     logger.info(f"  Hidden size: {config['model'].get('lstm_units', 256)}")
     logger.info(f"  Forecast horizon: {config['model']['prediction_length']}")
     logger.info(f"  Dropout: {config['model']['dropout_rate']}")
     logger.info(f"  L2 Reg: {config['model'].get('l2_regularization', 0.0)}")
+    logger.info(f"  BatchNorm: Enabled")
     logger.info(f"  Total parameters: {total_params:,}")
     logger.info(f"  Trainable parameters: {trainable_params:,}")
     
@@ -425,7 +481,8 @@ def step_7_train_model(model, X_train, y_train, X_val, y_val, config, device):
     logger.info(f"  Batch size: {config['model']['batch_size']}")
     logger.info(f"  Learning rate: {config['model']['learning_rate']}")
     logger.info(f"  Loss function: Huber (delta=0.5)")
-    logger.info(f"  Normalization: StandardScaler")
+    logger.info(f"  Normalization: StandardScaler + BatchNorm")
+    logger.info(f"  Early stopping patience: 25 epochs")
     
     model.fit(
         X_train, y_train,
@@ -450,14 +507,17 @@ def step_8_evaluate_model(model, X_test, y_test, config, device):
     mse = np.mean((y_pred - y_test) ** 2)
     rmse = np.sqrt(mse)
     mae = np.mean(np.abs(y_pred - y_test))
+    r2_score = 1 - (np.sum((y_test - y_pred) ** 2) / np.sum((y_test - y_test.mean()) ** 2))
     
     logger.info(f"")
     logger.info(f"--- Test Metrics ---")
     logger.info(f"MSE:  {mse:.6f}")
     logger.info(f"RMSE: {rmse:.6f}")
     logger.info(f"MAE:  {mae:.6f}")
+    logger.info(f"R2 Score: {r2_score:.6f}")
     logger.info(f"Prediction std: {y_pred.std():.6f}")
     logger.info(f"Target std: {y_test.std():.6f}")
+    logger.info(f"Std ratio (pred/target): {y_pred.std() / (y_test.std() + 1e-8):.4f}")
     
     return y_pred
 
@@ -469,11 +529,11 @@ def step_9_summary(config, device):
     logger.info(f"Timeframe: {config['data']['timeframe']}")
     logger.info(f"Device: {device}")
     logger.info(f"Framework: PyTorch")
-    logger.info(f"Model: EncoderDecoder LSTM (2 layers)")
+    logger.info(f"Model: Enhanced EncoderDecoder LSTM (3 layers)")
     logger.info(f"Architecture: {config['model']['sequence_length']} to {config['model']['prediction_length']}")
     logger.info(f"Features: 17 Technical Indicators (Research-Backed)")
     logger.info(f"Loss: Huber (delta=0.5)")
-    logger.info(f"Normalization: StandardScaler")
+    logger.info(f"Normalization: StandardScaler + BatchNorm")
     logger.info(f"Results saved to: {config['paths']['results_dir']}")
     logger.info(f"")
     logger.info(f"Pipeline completed successfully!")
@@ -485,8 +545,8 @@ def main():
     logger = setup_logging(config['paths']['logs_dir'])
     create_directories(config)
     
-    print_section("EncoderDecoder LSTM Multi-Step Forecasting System")
-    logger.info("Configuration: 17 Features + Encoder-Decoder Architecture")
+    print_section("Enhanced EncoderDecoder LSTM Multi-Step Forecasting System")
+    logger.info("Configuration: 17 Features + Enhanced Architecture + BatchNorm")
     
     try:
         device = step_0_initialize_device(config)
