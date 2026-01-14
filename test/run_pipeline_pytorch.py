@@ -147,6 +147,10 @@ def step_5_build_model(config, num_features, device):
 def step_6_train_model(model, X_train, y_train, X_val, y_val, config, device):
     print_section("STEP 6: Training Model")
     
+    # Get training parameters from config
+    batch_size = config['model'].get('batch_size', 32)
+    epochs = config['model'].get('epochs', 50)
+    
     X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
     y_train_tensor = torch.tensor(y_train, dtype=torch.float32)
     X_val_tensor = torch.tensor(X_val, dtype=torch.float32)
@@ -155,12 +159,12 @@ def step_6_train_model(model, X_train, y_train, X_val, y_val, config, device):
     train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
     val_dataset = TensorDataset(X_val_tensor, y_val_tensor)
     
-    train_loader = TorchDataLoader(train_dataset, batch_size=config['training']['batch_size'], shuffle=False)
-    val_loader = TorchDataLoader(val_dataset, batch_size=config['training']['batch_size'], shuffle=False)
+    train_loader = TorchDataLoader(train_dataset, batch_size=batch_size, shuffle=False)
+    val_loader = TorchDataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     
     logger.info(f"Training parameters:")
-    logger.info(f"  Epochs: {config['training']['epochs']}")
-    logger.info(f"  Batch size: {config['training']['batch_size']}")
+    logger.info(f"  Epochs: {epochs}")
+    logger.info(f"  Batch size: {batch_size}")
     logger.info(f"  Learning rate: {config['model']['learning_rate']}")
     logger.info(f"  Loss function: Huber")
     logger.info(f"  Normalization: StandardScaler")
@@ -168,8 +172,8 @@ def step_6_train_model(model, X_train, y_train, X_val, y_val, config, device):
     model.fit(
         X_train, y_train,
         X_val, y_val,
-        epochs=config['training']['epochs'],
-        batch_size=config['training']['batch_size'],
+        epochs=epochs,
+        batch_size=batch_size,
         verbose=True
     )
     
