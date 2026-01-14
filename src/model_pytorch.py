@@ -1,148 +1,163 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
-from pathlib import Path
 import logging
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 class LSTMModel(nn.Module):
-    def __init__(self, sequence_length: int, num_features: int, prediction_length: int,
-                 lstm_units: list, dropout_rate: float = 0.2, learning_rate: float = 0.001,
-                 l2_reg: float = 0.0, device=None):
-        """
-        Initialize LSTM model for PyTorch
-        
-        Args:
-            sequence_length: Input sequence length (100)
-            num_features: Number of features
-            prediction_length: Prediction sequence length (15)
-            lstm_units: List of LSTM units [256, 128, 64]
-            dropout_rate: Dropout rate
-            learning_rate: Learning rate
-            l2_reg: L2 regularization coefficient (weight decay)
-            device: torch device (cpu or cuda)
-        """
+    """
+    LSTM model for multi-step time series prediction.
+    Uses Huber loss to reduce over-smoothing in regression tasks.
+    """
+    
+    def __init__(
+        self,
+        sequence_length: int,
+        num_features: int,
+        prediction_length: int,
+        lstm_units: int = 128,
+        dropout_rate: float = 0.0,
+        learning_rate: float = 0.001,
+        l2_reg: float = 0.0,
+        device: str = 'cuda',
+        use_huber_loss: bool = True,
+        huber_delta: float = 0.5
+    ):
         super(LSTMModel, self).__init__()
         
         self.sequence_length = sequence_length
         self.num_features = num_features
         self.prediction_length = prediction_length
-        self.lstm_units = lstm_units
-        self.dropout_rate = dropout_rate
-        self.learning_rate = learning_rate
+        self.device = device
+        self.use_huber_loss = use_huber_loss
+        self.huber_delta = huber_delta
+        
+        # LSTM layers with stacking for better feature learning
+        self.lstm1 = nn.LSTM(
+            input_size=num_features,
+            hidden_size=lstm_units,
+            batch_first=True,
+            dropout=dropout_rate if dropout_rate > 0 else 0
+        )
+        
+        self.dropout1 = nn.Dropout(dropout_rate)
+        
+        self.lstm2 = nn.LSTM(
+            input_size=lstm_units,
+            hidden_size=lstm_units // 2,
+            batch_first=True,
+            dropout=dropout_rate if dropout_rate > 0 else 0
+        )
+        
+        self.dropout2 = nn.Dropout(dropout_rate)
+        
+        # Dense layers for output prediction
+        self.fc1 = nn.Linear(lstm_units // 2, lstm_units // 2)
+        self.fc2 = nn.Linear(lstm_units // 2, num_features * prediction_length)
+        
+        self.relu = nn.ReLU()
         self.l2_reg = l2_reg
-        self.device = device if device is not None else torch.device('cpu')
-        self.history = None
+        self.learning_rate = learning_rate
+        self.optimizer = optim.Adam(self.parameters(), lr=learning_rate)
         
-        # Build LSTM layers
-        self.lstm_layers = nn.ModuleList()
-        self.batch_norms = nn.ModuleList()
-        self.dropouts = nn.ModuleList()
+        # Loss function: Huber instead of MSE to preserve variance
+        if use_huber_loss:
+            self.criterion = nn.HuberLoss(delta=huber_delta, reduction='mean')
+            logger.info(f"Using Huber loss with delta={huber_delta}")
+        else:
+            self.criterion = nn.MSELoss()
+            logger.info("Using MSE loss")
         
-        # First LSTM layer
-        self.lstm_layers.append(
-            nn.LSTM(
-                input_size=num_features,
-                hidden_size=lstm_units[0],
-                batch_first=True,
-                dropout=dropout_rate if len(lstm_units) > 1 else 0
-            )
+        self.to(device)
+        
+        logger.info(
+            f"LSTM Model initialized: seq_length={sequence_length}, "
+            f"num_features={num_features}, pred_length={prediction_length}, "
+            f"lstm_units={lstm_units}"
         )
-        self.batch_norms.append(nn.BatchNorm1d(lstm_units[0]))
-        self.dropouts.append(nn.Dropout(dropout_rate))
-        
-        # Middle LSTM layers
-        for i in range(1, len(lstm_units)):
-            self.lstm_layers.append(
-                nn.LSTM(
-                    input_size=lstm_units[i-1],
-                    hidden_size=lstm_units[i],
-                    batch_first=True,
-                    dropout=dropout_rate if i < len(lstm_units) - 1 else 0
-                )
-            )
-            self.batch_norms.append(nn.BatchNorm1d(lstm_units[i]))
-            self.dropouts.append(nn.Dropout(dropout_rate))
-        
-        # Dense layers
-        self.fc1 = nn.Linear(lstm_units[-1], 64)
-        self.dropout_fc1 = nn.Dropout(dropout_rate)
-        self.fc2 = nn.Linear(64, prediction_length * num_features)
-        
-        # Move to device
-        self.to(self.device)
-        
-        # Setup optimizer and loss
-        self.optimizer = optim.Adam(
-            self.parameters(),
-            lr=learning_rate,
-            weight_decay=l2_reg
-        )
-        self.loss_fn = nn.MSELoss()
-        
-        logger.info("PyTorch LSTM Model initialized")
     
     def forward(self, x):
         """
-        Forward pass
+        Forward pass.
         
         Args:
-            x: Input tensor of shape (batch_size, sequence_length, num_features)
+            x: (batch_size, sequence_length, num_features)
             
         Returns:
-            Output tensor of shape (batch_size, prediction_length, num_features)
+            (batch_size, prediction_length, num_features)
         """
-        # Pass through LSTM layers
-        for i, lstm_layer in enumerate(self.lstm_layers):
-            x, _ = lstm_layer(x)
-            # Apply batch norm only if sequence length > 1
-            if x.size(1) > 1:
-                # Reshape for batch norm: (batch, seq_len, hidden) -> (batch*seq_len, hidden)
-                batch_size, seq_len, hidden_size = x.size()
-                x_reshaped = x.contiguous().view(-1, hidden_size)
-                x_reshaped = self.batch_norms[i](x_reshaped)
-                x = x_reshaped.view(batch_size, seq_len, hidden_size)
-            x = self.dropouts[i](x)
+        # LSTM layer 1
+        lstm_out1, _ = self.lstm1(x)  # (batch, seq_len, lstm_units)
+        lstm_out1 = self.dropout1(lstm_out1)
         
-        # Take last output from LSTM sequence
-        x = x[:, -1, :]  # (batch_size, lstm_units[-1])
+        # LSTM layer 2
+        lstm_out2, _ = self.lstm2(lstm_out1)  # (batch, seq_len, lstm_units//2)
+        lstm_out2 = self.dropout2(lstm_out2)
+        
+        # Use last output for prediction
+        last_output = lstm_out2[:, -1, :]  # (batch, lstm_units//2)
         
         # Dense layers
-        x = self.fc1(x)
-        x = torch.relu(x)
-        x = self.dropout_fc1(x)
-        x = self.fc2(x)
+        fc_out = self.relu(self.fc1(last_output))
+        output = self.fc2(fc_out)  # (batch, num_features * pred_length)
         
-        # Reshape output
-        x = x.view(-1, self.prediction_length, self.num_features)
+        # Reshape to (batch, pred_length, num_features)
+        output = output.reshape(-1, self.prediction_length, self.num_features)
         
-        return x
+        return output
+    
+    def calculate_loss(self, y_pred, y_true):
+        """
+        Calculate loss with optional L2 regularization.
+        
+        Args:
+            y_pred: Model predictions
+            y_true: Ground truth targets
+            
+        Returns:
+            Total loss (loss + L2 penalty)
+        """
+        # Primary loss (MSE or Huber)
+        loss = self.criterion(y_pred, y_true)
+        
+        # L2 regularization
+        if self.l2_reg > 0:
+            l2_penalty = 0
+            for param in self.parameters():
+                l2_penalty += torch.norm(param)
+            loss += self.l2_reg * l2_penalty
+        
+        return loss
     
     def train_epoch(self, train_loader):
         """
-        Train for one epoch
+        Train for one epoch.
         
         Args:
-            train_loader: PyTorch DataLoader for training
+            train_loader: DataLoader for training data
             
         Returns:
             Average loss for the epoch
         """
-        super().train()
-        total_loss = 0.0
+        self.train()
+        total_loss = 0
         
-        for batch_x, batch_y in train_loader:
-            batch_x = batch_x.to(self.device)
-            batch_y = batch_y.to(self.device)
+        for X_batch, y_batch in train_loader:
+            X_batch = X_batch.to(self.device)
+            y_batch = y_batch.to(self.device)
             
             # Forward pass
-            self.optimizer.zero_grad()
-            outputs = self(batch_x)
-            loss = self.loss_fn(outputs, batch_y)
+            y_pred = self(X_batch)
+            
+            # Calculate loss
+            loss = self.calculate_loss(y_pred, y_batch)
             
             # Backward pass
+            self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
             
@@ -150,68 +165,104 @@ class LSTMModel(nn.Module):
         
         return total_loss / len(train_loader)
     
-    def validate(self, val_loader):
+    def evaluate(self, test_loader):
         """
-        Validate the model
+        Evaluate model on test data.
         
         Args:
-            val_loader: PyTorch DataLoader for validation
+            test_loader: DataLoader for test data
             
         Returns:
-            Average loss for validation set
+            (average_loss, mae, rmse, r2_score)
         """
-        super().eval()
-        total_loss = 0.0
+        self.eval()
+        total_loss = 0
+        all_preds = []
+        all_targets = []
         
         with torch.no_grad():
-            for batch_x, batch_y in val_loader:
-                batch_x = batch_x.to(self.device)
-                batch_y = batch_y.to(self.device)
+            for X_batch, y_batch in test_loader:
+                X_batch = X_batch.to(self.device)
+                y_batch = y_batch.to(self.device)
                 
-                outputs = self(batch_x)
-                loss = self.loss_fn(outputs, batch_y)
+                y_pred = self(X_batch)
+                loss = self.criterion(y_pred, y_batch)
+                
                 total_loss += loss.item()
+                all_preds.append(y_pred.cpu().numpy())
+                all_targets.append(y_batch.cpu().numpy())
         
-        return total_loss / len(val_loader)
+        # Concatenate all predictions and targets
+        all_preds = np.concatenate(all_preds, axis=0)
+        all_targets = np.concatenate(all_targets, axis=0)
+        
+        # Calculate metrics
+        avg_loss = total_loss / len(test_loader)
+        
+        # Flatten for metric calculation
+        preds_flat = all_preds.flatten()
+        targets_flat = all_targets.flatten()
+        
+        mae = np.mean(np.abs(preds_flat - targets_flat))
+        rmse = np.sqrt(np.mean((preds_flat - targets_flat) ** 2))
+        
+        # R² score
+        ss_res = np.sum((targets_flat - preds_flat) ** 2)
+        ss_tot = np.sum((targets_flat - np.mean(targets_flat)) ** 2)
+        r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+        
+        return avg_loss, mae, rmse, r2
     
-    def train_model(self, train_loader, val_loader, epochs: int = 50, device=None):
+    def fit(
+        self,
+        X_train,
+        y_train,
+        X_test,
+        y_test,
+        epochs: int = 50,
+        batch_size: int = 32,
+        verbose: bool = True
+    ):
         """
-        Train the model
+        Train the model.
         
         Args:
-            train_loader: PyTorch DataLoader for training
-            val_loader: PyTorch DataLoader for validation
-            epochs: Number of epochs
-            device: Device to use (cpu or cuda)
+            X_train, y_train: Training data
+            X_test, y_test: Test data
+            epochs: Number of training epochs
+            batch_size: Batch size
+            verbose: Print training progress
         """
-        if device is not None:
-            self.device = device
-            self.to(self.device)
+        # Create data loaders
+        train_dataset = TensorDataset(
+            torch.tensor(X_train, dtype=torch.float32),
+            torch.tensor(y_train, dtype=torch.float32)
+        )
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
         
-        self.history = {
-            'train_loss': [],
-            'val_loss': []
-        }
+        test_dataset = TensorDataset(
+            torch.tensor(X_test, dtype=torch.float32),
+            torch.tensor(y_test, dtype=torch.float32)
+        )
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
         
-        patience = 15
-        patience_counter = 0
         best_val_loss = float('inf')
-        
-        logger.info(f"Starting training for {epochs} epochs...")
-        logger.info(f"Training samples: {len(train_loader.dataset)}, Validation samples: {len(val_loader.dataset)}")
+        patience = 10
+        patience_counter = 0
         
         for epoch in range(epochs):
-            # Train
             train_loss = self.train_epoch(train_loader)
+            val_loss, val_mae, val_rmse, val_r2 = self.evaluate(test_loader)
             
-            # Validate
-            val_loss = self.validate(val_loader)
-            
-            self.history['train_loss'].append(train_loss)
-            self.history['val_loss'].append(val_loss)
-            
-            if (epoch + 1) % 5 == 0 or epoch == 0:
-                logger.info(f"Epoch {epoch + 1}/{epochs} - Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}")
+            if verbose and (epoch + 1) % 5 == 0:
+                logger.info(
+                    f"Epoch {epoch+1}/{epochs} - "
+                    f"Train Loss: {train_loss:.6f}, "
+                    f"Val Loss: {val_loss:.6f}, "
+                    f"MAE: {val_mae:.6f}, "
+                    f"RMSE: {val_rmse:.6f}, "
+                    f"R²: {val_r2:.4f}"
+                )
             
             # Early stopping
             if val_loss < best_val_loss:
@@ -220,85 +271,28 @@ class LSTMModel(nn.Module):
             else:
                 patience_counter += 1
                 if patience_counter >= patience:
-                    logger.info(f"Early stopping at epoch {epoch + 1}")
+                    logger.info(f"Early stopping at epoch {epoch+1}")
                     break
-            
-            # Learning rate scheduling (manual)
-            if patience_counter > 5 and patience_counter % 5 == 0:
-                for param_group in self.optimizer.param_groups:
-                    param_group['lr'] *= 0.5
-                    logger.info(f"Reduced learning rate to {param_group['lr']:.2e}")
         
-        logger.info("Training completed")
+        logger.info("Training complete")
     
-    def predict(self, X):
+    def save(self, path: str):
         """
-        Make predictions
+        Save model weights.
         
         Args:
-            X: Input tensor of shape (batch_size, sequence_length, num_features)
-               or numpy array
-            
-        Returns:
-            Predictions as numpy array
+            path: Path to save model
         """
-        super().eval()
-        
-        # Convert to tensor if needed
-        if isinstance(X, np.ndarray):
-            X = torch.tensor(X, dtype=torch.float32)
-        
-        X = X.to(self.device)
-        
-        with torch.no_grad():
-            predictions = self(X)
-        
-        return predictions.cpu().numpy()
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        torch.save(self.state_dict(), path)
+        logger.info(f"Model saved to {path}")
     
-    def save(self, model_path: str):
+    def load(self, path: str):
         """
-        Save model to disk
+        Load model weights.
         
         Args:
-            model_path: Path to save model
+            path: Path to load model from
         """
-        Path(model_path).parent.mkdir(parents=True, exist_ok=True)
-        torch.save(self.state_dict(), model_path)
-        logger.info(f"Model saved to {model_path}")
-    
-    def load(self, model_path: str):
-        """
-        Load model from disk
-        
-        Args:
-            model_path: Path to load model
-        """
-        self.load_state_dict(torch.load(model_path, map_location=self.device))
-        self.to(self.device)
-        logger.info(f"Model loaded from {model_path}")
-    
-    def get_summary(self):
-        """
-        Get model summary
-        """
-        summary_str = f"""
-=== PyTorch LSTM Model Summary ===
-Model Architecture:
-  - Input Shape: ({self.sequence_length}, {self.num_features})
-  - LSTM Units: {self.lstm_units}
-  - Output Shape: ({self.prediction_length}, {self.num_features})
-  - Dropout Rate: {self.dropout_rate}
-  - Learning Rate: {self.learning_rate}
-  - L2 Regularization: {self.l2_reg}
-  - Device: {self.device}
-
-Total Parameters: {self.count_parameters():,}
-==================================
-        """
-        return summary_str
-    
-    def count_parameters(self):
-        """
-        Count total number of trainable parameters
-        """
-        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+        self.load_state_dict(torch.load(path, map_location=self.device))
+        logger.info(f"Model loaded from {path}")
