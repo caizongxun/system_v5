@@ -26,6 +26,12 @@ features:
     - bollinger_bands
   normalization: "minmax"
 
+gpu:
+  enabled: true
+  memory_growth: true
+  memory_limit_gb: null
+  mixed_precision: false
+
 paths:
   test_dir: "test"
   data_dir: "test/data"
