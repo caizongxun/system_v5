@@ -1,6 +1,7 @@
 project:
   name: "BTC_15m Prediction System"
-  version: "1.0"
+  version: "2.0"
+  description: "LSTM model for predicting 15 future K-bars using 100 historical K-bars with enhanced volatility features"
 
 data:
   symbol: "BTCUSDT"
@@ -10,7 +11,7 @@ data:
 model:
   sequence_length: 100
   prediction_length: 15
-  lstm_units: [256, 128, 64]
+  lstm_units: 256
   dropout_rate: 0.3
   batch_size: 32
   epochs: 100
@@ -21,28 +22,29 @@ model:
 
 features:
   use_technical_indicators: true
-  indicators:
-    - rsi
-    - macd
-    - bollinger_bands
-    - atr
-    - momentum
-  normalization: "minmax"
+  normalization: "standard"  # StandardScaler (Z-score) for better variance preservation
   selected_features:
+    # Price-based features
     - returns
     - high_low_ratio
     - open_close_ratio
     - price_to_sma_10
     - price_to_sma_20
-    - volatility_20
+    
+    # Volatility features (NEW: to capture market fluctuations)
     - volatility_5
+    - volatility_20
     - momentum_5
     - momentum_10
     - ATR
+    
+    # Momentum and trend indicators
     - RSI
     - MACD
     - MACD_Signal
     - BB_Position
+    
+    # Volume feature
     - Volume_Ratio
     - returns_std_5
 
