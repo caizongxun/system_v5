@@ -105,7 +105,7 @@ class EncoderDecoderLSTM(nn.Module):
         val_loader = TorchDataLoader(val_dataset, batch_size=batch_size, shuffle=False)
         
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=10, verbose=verbose
+            self.optimizer, mode='min', factor=0.5, patience=10
         )
         
         best_val_loss = float('inf')
@@ -228,7 +228,7 @@ def calculate_technical_indicators(df):
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / (loss + 1e-8)
     df['rsi'] = 100 - (100 / (1 + rs))
-    df['rsi'] = df['rsi'].fillna(50)  # Default to neutral
+    df['rsi'] = df['rsi'].fillna(50)
     
     # 7-9. MACD (12, 26, 9)
     exp1 = df['close'].ewm(span=12, adjust=False).mean()
@@ -238,9 +238,9 @@ def calculate_technical_indicators(df):
     df['macd_diff'] = df['macd'] - df['macd_signal']
     
     # 10-12. SMAs (7, 14, 21)
-    df['sma_7'] = df['close'].rolling(window=7).mean().fillna(method='bfill').fillna(method='ffill')
-    df['sma_14'] = df['close'].rolling(window=14).mean().fillna(method='bfill').fillna(method='ffill')
-    df['sma_21'] = df['close'].rolling(window=21).mean().fillna(method='bfill').fillna(method='ffill')
+    df['sma_7'] = df['close'].rolling(window=7).mean().bfill().ffill()
+    df['sma_14'] = df['close'].rolling(window=14).mean().bfill().ffill()
+    df['sma_21'] = df['close'].rolling(window=21).mean().bfill().ffill()
     
     # 13. KAMA (Kaufman's Adaptive Moving Average)
     period = 10
@@ -271,7 +271,7 @@ def calculate_technical_indicators(df):
     df['price_to_sma_20'] = df['close'] / (df['sma_14'] + 1e-8)
     
     # Fill NaN values
-    df = df.fillna(method='bfill').fillna(method='ffill')
+    df = df.bfill().ffill()
     
     return df
 
@@ -451,7 +451,8 @@ def step_8_evaluate_model(model, X_test, y_test, config, device):
     rmse = np.sqrt(mse)
     mae = np.mean(np.abs(y_pred - y_test))
     
-    logger.info(f"\n--- Test Metrics ---")
+    logger.info(f"")
+    logger.info(f"--- Test Metrics ---")
     logger.info(f"MSE:  {mse:.6f}")
     logger.info(f"RMSE: {rmse:.6f}")
     logger.info(f"MAE:  {mae:.6f}")
@@ -469,12 +470,13 @@ def step_9_summary(config, device):
     logger.info(f"Device: {device}")
     logger.info(f"Framework: PyTorch")
     logger.info(f"Model: EncoderDecoder LSTM (2 layers)")
-    logger.info(f"Architecture: {config['model']['sequence_length']} → {config['model']['prediction_length']}")
+    logger.info(f"Architecture: {config['model']['sequence_length']} to {config['model']['prediction_length']}")
     logger.info(f"Features: 17 Technical Indicators (Research-Backed)")
     logger.info(f"Loss: Huber (delta=0.5)")
     logger.info(f"Normalization: StandardScaler")
     logger.info(f"Results saved to: {config['paths']['results_dir']}")
-    logger.info(f"\nPipeline completed successfully!")
+    logger.info(f"")
+    logger.info(f"Pipeline completed successfully!")
 
 def main():
     global logger
