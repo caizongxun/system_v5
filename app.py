@@ -5,6 +5,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 import torch
 import logging
+import pickle
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -42,7 +43,8 @@ def load_model_and_config():
         dropout_rate=config['model']['dropout_rate'],
         learning_rate=config['model']['learning_rate'],
         l2_reg=config['model'].get('l2_regularization', 0.0),
-        device=device
+        device=device,
+        use_huber_loss=True
     )
     
     model_path = Path(config['paths']['model_dir']) / "btc_15m_model_pytorch.pt"
@@ -52,7 +54,16 @@ def load_model_and_config():
     else:
         st.error("Model file not found! Please train the model first.")
     
-    return model, config, feature_columns, device
+    # Load scaler
+    scaler_path = Path(config['paths']['model_dir']) / "btc_15m_scaler.pkl"
+    scaler = None
+    if scaler_path.exists():
+        with open(scaler_path, 'rb') as f:
+            scaler = pickle.load(f)
+    else:
+        st.warning("Scaler file not found. Using new scaler.")
+    
+    return model, config, feature_columns, device, scaler
 
 @st.cache_resource
 def load_data():
@@ -66,7 +77,7 @@ def load_data():
     )
     return df
 
-def preprocess_data(df, processor, feature_columns):
+def preprocess_data(df, processor, feature_columns, scaler=None):
     df = df.copy()
     
     if 'returns' not in df.columns:
@@ -74,7 +85,11 @@ def preprocess_data(df, processor, feature_columns):
     else:
         df_processed = df
     
-    normalized_data, scaler = processor.normalize_features(df_processed, feature_columns)
+    if scaler is not None:
+        normalized_data = scaler.transform(df_processed[feature_columns].values)
+    else:
+        normalized_data, scaler = processor.normalize_features(df_processed, feature_columns)
+    
     return normalized_data, scaler, df_processed
 
 def plot_klines(df_historical, predicted_klines):
@@ -217,13 +232,13 @@ def main():
     st.info("Loading model and data...")
     
     try:
-        model, config, feature_columns, device = load_model_and_config()
+        model, config, feature_columns, device, scaler = load_model_and_config()
         df = load_data()
         processor = DataProcessor()
         
         st.success("Model and data loaded successfully!")
         
-        normalized_data, scaler, df_processed = preprocess_data(df, processor, feature_columns)
+        normalized_data, scaler, df_processed = preprocess_data(df, processor, feature_columns, scaler)
         
         predictor = RollingPredictor(model, scaler, feature_columns, device)
         
@@ -333,23 +348,25 @@ def main():
             col1, col2, col3 = st.columns(3)
             
             with col1:
-                st.metric("R2 Score (Test)", "0.8473")
+                st.metric("R2_Score (Test)", "0.2447")
             
             with col2:
-                st.metric("RMSE", "0.0881")
+                st.metric("RMSE", "0.5811")
             
             with col3:
-                st.metric("MAE", "0.0417")
+                st.metric("MAE", "0.3210")
         
         st.markdown("---")
         st.subheader("Model Information")
         
         with st.expander("Model Architecture"):
             st.write("""
-            - Architecture: Multi-layer LSTM with 3 stacked layers
-            - Hidden Units: [256, 128, 64]
+            - Architecture: 2-Layer LSTM with Huber Loss
+            - Hidden Units: [256, 128]
             - Input Shape: (100 time steps, 16 features)
             - Output Shape: (15 time steps, 16 features)
+            - Loss Function: Huber (delta=0.5)
+            - Normalization: StandardScaler (Z-score)
             - Prediction Mode: Fixed baseline (last 100 bars remain constant)
             - Device: GPU (CUDA) if available
             """)
@@ -415,9 +432,10 @@ def main():
         st.error(f"Error: {str(e)}")
         st.write("Please make sure:")
         st.write("1. Model file exists at: test/models/btc_15m_model_pytorch.pt")
-        st.write("2. Config file exists at: config/config.yaml")
-        st.write("3. Model was trained with the new features")
-        st.write("4. All dependencies are installed")
+        st.write("2. Scaler file exists at: test/models/btc_15m_scaler.pkl")
+        st.write("3. Config file exists at: config/config.yaml")
+        st.write("4. Model was trained with the new features")
+        st.write("5. All dependencies are installed")
         logger.exception("App error:")
 
 if __name__ == "__main__":
