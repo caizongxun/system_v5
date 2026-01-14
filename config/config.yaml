@@ -25,6 +25,8 @@ features:
     - rsi
     - macd
     - bollinger_bands
+    - atr
+    - momentum
   normalization: "minmax"
   selected_features:
     - returns
@@ -33,11 +35,16 @@ features:
     - price_to_sma_10
     - price_to_sma_20
     - volatility_20
+    - volatility_5
+    - momentum_5
+    - momentum_10
+    - ATR
     - RSI
     - MACD
     - MACD_Signal
     - BB_Position
     - Volume_Ratio
+    - returns_std_5
 
 gpu:
   enabled: true
