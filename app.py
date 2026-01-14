@@ -187,17 +187,17 @@ def display_prediction_table(predicted_klines):
 def main():
     st.set_page_config(
         page_title="BTC Price Predictor",
-        page_icon="📈",
+        page_icon="btc",
         layout="wide",
         initial_sidebar_state="expanded"
     )
     
-    st.title("🤖 BTC 15M Price Prediction Model (Fixed Baseline)")
+    st.title("BTC 15M Price Prediction Model (Fixed Baseline)")
     st.markdown("---")
     
     # Sidebar
     with st.sidebar:
-        st.header("⚙️ Settings")
+        st.header("Settings")
         
         show_table = st.checkbox("Show Prediction Table", value=True)
         show_analysis = st.checkbox("Show Volatility Analysis", value=True)
@@ -205,7 +205,7 @@ def main():
         
         st.markdown("---")
         st.info("""
-        **Fixed Baseline Mode:**
+        Fixed Baseline Mode:
         Predictions are based on a fixed
         historical window (last 100 bars).
         This ensures consistent predictions
@@ -213,14 +213,14 @@ def main():
         """)
     
     # Load model and data
-    st.info("⏳ Loading model and data...")
+    st.info("Loading model and data...")
     
     try:
         model, config, feature_columns, device = load_model_and_config()
         df = load_data()
         processor = DataProcessor()
         
-        st.success("✅ Model and data loaded successfully!")
+        st.success("Model and data loaded successfully!")
         
         # Preprocess
         normalized_data, scaler, df_processed = preprocess_data(df, processor, feature_columns)
@@ -229,13 +229,13 @@ def main():
         predictor = RollingPredictor(model, scaler, feature_columns, device)
         
         # Make predictions using fixed baseline (last 100 bars)
-        st.info("🔮 Generating predictions...")
+        st.info("Generating predictions...")
         X_baseline = normalized_data[-100:]
         predicted_klines = predictor.predict_with_fixed_baseline(X_baseline, df)
-        st.success("✅ Predictions generated!")
+        st.success("Predictions generated!")
         
         # Display chart
-        st.subheader("📊 Price Chart with Predictions")
+        st.subheader("Price Chart with Predictions")
         fig = plot_klines(df, predicted_klines)
         st.plotly_chart(fig, use_container_width=True)
         
@@ -276,7 +276,7 @@ def main():
         
         # Volatility analysis
         if show_analysis:
-            st.subheader("📈 Volatility Analysis")
+            st.subheader("Volatility Analysis")
             
             col1, col2, col3 = st.columns(3)
             
@@ -315,14 +315,14 @@ def main():
         # Prediction table
         if show_table:
             st.markdown("---")
-            st.subheader("📋 Detailed Predictions")
+            st.subheader("Detailed Predictions")
             pred_df = display_prediction_table(predicted_klines)
             st.dataframe(pred_df, use_container_width=True)
         
         # Model metrics
         if show_metrics:
             st.markdown("---")
-            st.subheader("📊 Model Performance Metrics")
+            st.subheader("Model Performance Metrics")
             
             col1, col2, col3, col4 = st.columns(4)
             
@@ -341,7 +341,7 @@ def main():
             col1, col2, col3 = st.columns(3)
             
             with col1:
-                st.metric("R² Score (Test)", "0.8334")
+                st.metric("R2 Score (Test)", "0.8334")
             
             with col2:
                 st.metric("RMSE", "0.0887")
@@ -351,49 +351,49 @@ def main():
         
         # Information sections
         st.markdown("---")
-        st.subheader("ℹ️ Model Information")
+        st.subheader("Model Information")
         
-        with st.expander("🏗️ Model Architecture"):
+        with st.expander("Model Architecture"):
             st.write("""
-            - **Architecture**: Multi-layer LSTM with 3 stacked layers
-            - **Hidden Units**: [256, 128, 64]
-            - **Input Shape**: (100 time steps, 16 features)
-            - **Output Shape**: (15 time steps, 16 features)
-            - **Prediction Mode**: Fixed baseline (last 100 bars remain constant)
-            - **Device**: GPU (CUDA) if available
+            - Architecture: Multi-layer LSTM with 3 stacked layers
+            - Hidden Units: [256, 128, 64]
+            - Input Shape: (100 time steps, 16 features)
+            - Output Shape: (15 time steps, 16 features)
+            - Prediction Mode: Fixed baseline (last 100 bars remain constant)
+            - Device: GPU (CUDA) if available
             """)
         
-        with st.expander("📊 Feature Engineering"):
+        with st.expander("Feature Engineering"):
             st.write(f"""
             Total features: {len(feature_columns)}
             
-            **Price Features:**
+            Price Features:
             - returns: Price percentage change
             - high_low_ratio: Intra-bar price range
             - open_close_ratio: Opening relative change
             
-            **Trend Features:**
+            Trend Features:
             - price_to_sma_10: Price vs 10-bar MA
             - price_to_sma_20: Price vs 20-bar MA
             - momentum_5: 5-bar rate of change
             - momentum_10: 10-bar rate of change
             
-            **Volatility Features:**
+            Volatility Features:
             - volatility_20: 20-bar rolling std dev
             - volatility_5: 5-bar rolling std dev
             - ATR: Average True Range
             - returns_std_5: 5-bar returns volatility
             
-            **Technical Indicators:**
+            Technical Indicators:
             - RSI: Relative Strength Index (14)
             - MACD: Moving Average Convergence Divergence
             - BB_Position: Bollinger Bands position
             - Volume_Ratio: Volume vs 20-bar MA
             """)
         
-        with st.expander("⚠️ Disclaimer"):
+        with st.expander("Disclaimer"):
             st.warning("""
-            **Important Disclaimer:**
+            Important Disclaimer:
             - This model is for educational and research purposes only
             - Do NOT use for actual trading without proper risk management
             - Past performance does NOT guarantee future results
@@ -404,11 +404,11 @@ def main():
         
         st.markdown("---")
         st.markdown(
-            f"⏰ Last update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            f"Last update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
         
     except Exception as e:
-        st.error(f"❌ Error: {str(e)}")
+        st.error(f"Error: {str(e)}")
         st.write("Please make sure:")
         st.write("1. Model file exists at: test/models/btc_15m_model_pytorch.pt")
         st.write("2. Config file exists at: config/config.yaml")
