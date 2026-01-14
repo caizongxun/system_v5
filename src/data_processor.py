@@ -70,13 +70,21 @@ class DataProcessor:
             df['MACD'] = 0.0
             df['MACD_Signal'] = 0.0
         
-        # Bollinger Bands
+        # Bollinger Bands - Use correct ta-lib API
         try:
-            bb = ta.volatility.bollinger_channel(df['close'], window=20, scalar=2)
-            if isinstance(bb, pd.DataFrame):
-                df['BB_Position'] = (df['close'] - bb.iloc[:, 0]) / (bb.iloc[:, 2] - bb.iloc[:, 0])
-            else:
-                df['BB_Position'] = 0.5
+            # Calculate SMA and standard deviation
+            sma = df['close'].rolling(window=20).mean()
+            std = df['close'].rolling(window=20).std()
+            
+            # Upper and lower bands
+            upper_band = sma + (2 * std)
+            lower_band = sma - (2 * std)
+            
+            # BB Position: 0 = lower band, 1 = upper band, 0.5 = middle (SMA)
+            bb_position = (df['close'] - lower_band) / (upper_band - lower_band)
+            df['BB_Position'] = bb_position.clip(0, 1)  # Clip to [0, 1]
+            
+            logger.info("Bollinger Bands calculated successfully")
         except Exception as e:
             logger.warning(f"Error calculating Bollinger Bands: {e}. Setting to 0.5.")
             df['BB_Position'] = 0.5
