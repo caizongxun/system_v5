@@ -68,12 +68,9 @@ class RollingPredictor:
             logger.warning("No scaler available, returning normalized predictions")
             return pred_normalized
         
-        # Use scaler.inverse_transform() to properly denormalize
-        # This uses the mean and std saved during training
         pred_denorm = self.scaler.inverse_transform(pred_normalized)
         
         logger.debug(f"Denormalized prediction shape: {pred_denorm.shape}")
-        logger.debug(f"Denormalized returns range: [{pred_denorm[:, 0].min():.6f}, {pred_denorm[:, 0].max():.6f}]")
         
         return pred_denorm
     
@@ -86,7 +83,7 @@ class RollingPredictor:
     ) -> List[Dict]:
         """
         Convert predicted features to K-line OHLCV data with proper OHLC constraints.
-        Uses denormalized returns directly for accurate price generation.
+        Uses denormalized predictions directly without artificial constraints.
         
         Args:
             pred_denorm: (15, num_features) denormalized predictions
@@ -102,7 +99,6 @@ class RollingPredictor:
         current_close = last_candle['close']
         current_volume = last_candle['volume']
         
-        # Get feature indices
         returns_idx = feature_columns.index('returns')
         high_low_ratio_idx = feature_columns.index('high_low_ratio')
         open_close_ratio_idx = feature_columns.index('open_close_ratio')
@@ -115,27 +111,21 @@ class RollingPredictor:
         for i in range(len(pred_denorm)):
             pred_features = pred_denorm[i]
             
-            # Extract denormalized features
-            returns = pred_features[returns_idx]  # Now in original scale! (e.g., 0.001 = 0.1%)
+            returns = pred_features[returns_idx]
             high_low_ratio = pred_features[high_low_ratio_idx]
             open_close_ratio = pred_features[open_close_ratio_idx]
             volume_ratio = pred_features[volume_ratio_idx]
             volatility = max(abs(pred_features[volatility_5_idx]), 0.001)
             
-            # CRITICAL FIX: Returns is now real percentage (e.g., 0.001 = 0.1%), not Z-score
-            # Clamp to realistic range: -2% to +2%
-            returns_clamped = np.clip(returns, -0.02, 0.02)
+            logger.debug(f"Step {i}: returns={returns:.6f}, high_low_ratio={high_low_ratio:.6f}")
             
-            # Calculate base OHLC prices
             open_price = current_close
-            close_price = open_price * (1 + returns_clamped)
+            close_price = open_price * (1 + returns)
             
-            # Calculate intra-bar range
             intra_range = abs(high_low_ratio) * abs(close_price)
             volatility_range = abs(volatility) * abs(open_price) * volatility_multiplier
             total_range = max(intra_range, volatility_range)
             
-            # Determine high and low
             if close_price >= open_price:
                 high_price = max(open_price, close_price) + total_range * 0.5
                 low_price = min(open_price, close_price) - total_range * 0.1
@@ -143,17 +133,14 @@ class RollingPredictor:
                 high_price = max(open_price, close_price) + total_range * 0.1
                 low_price = min(open_price, close_price) - total_range * 0.5
             
-            # Enforce OHLC constraints
             high_price = max(high_price, max(open_price, close_price))
             low_price = min(low_price, min(open_price, close_price))
             
             if high_price <= low_price:
                 high_price = low_price + abs(total_range)
             
-            # Volume
             volume = max(current_volume * np.clip(volume_ratio, 0.3, 3.0), 100)
             
-            # Create candle
             kline = {
                 'time': current_time,
                 'open': float(np.round(open_price, 2)),
@@ -163,14 +150,13 @@ class RollingPredictor:
                 'volume': float(np.round(volume, 0)),
                 'type': 'predicted',
                 'step': i + 1,
-                'returns': float(returns_clamped)
+                'returns': float(returns)
             }
             
             klines.append(kline)
             
-            logger.debug(f"Step {i+1}: O={open_price:.2f} H={high_price:.2f} L={low_price:.2f} C={close_price:.2f} Returns={returns_clamped:.4f}")
+            logger.debug(f"Step {i+1}: O={open_price:.2f} H={high_price:.2f} L={low_price:.2f} C={close_price:.2f} Returns={returns:.6f}")
             
-            # Update for next iteration
             current_time += timedelta(minutes=15)
             current_close = close_price
             current_volume = volume
@@ -197,16 +183,13 @@ class RollingPredictor:
         Returns:
             (predicted_klines, predictions_normalized, predictions_denormalized)
         """
-        # Use the most recent seq_length bars as input
         X_latest = df_normalized_full[-seq_length:]
         
         logger.info(f"Making prediction from bar index {len(df_original) - seq_length} to {len(df_original)}")
         
-        # Predict next 15 bars
         pred_norm = self.predict_single_step(X_latest)
         pred_denorm = self.denormalize_prediction(pred_norm)
         
-        # Get last actual candle for reference
         last_candle = {
             'time': pd.to_datetime(df_original.iloc[-1]['open_time']),
             'open': float(df_original.iloc[-1]['open']),
@@ -216,7 +199,6 @@ class RollingPredictor:
             'volume': float(df_original.iloc[-1]['volume'])
         }
         
-        # Generate K-lines
         klines = self.generate_klines_from_prediction(
             pred_denorm,
             last_candle,
@@ -236,7 +218,7 @@ class RollingPredictor:
         Predict using a fixed baseline (last 100 bars).
         This is used for consistent predictions across time.
         
-        CRITICAL FIX: Now properly denormalizes all features including returns!
+        Uses model predictions directly without artificial constraints.
         
         Args:
             X_baseline: (100, num_features) fixed baseline (NORMALIZED)
@@ -247,21 +229,20 @@ class RollingPredictor:
         Returns:
             List of predicted klines
         """
-        logger.info(f"\n{'='*60}")
+        logger.info(f"{'='*60}")
         logger.info("PREDICTION STEP")
         logger.info(f"Input baseline shape: {X_baseline.shape}")
         logger.info(f"Last historical price: ${df_original.iloc[-1]['close']:.2f}")
         
-        # Get normalized prediction from model
         pred_norm = self.predict_single_step(X_baseline)
         logger.info(f"Model output (normalized) shape: {pred_norm.shape}")
-        logger.info(f"Normalized returns range: [{pred_norm[:, 0].min():.6f}, {pred_norm[:, 0].max():.6f}]")
+        logger.info(f"Normalized returns - min: {pred_norm[:, 0].min():.6f}, max: {pred_norm[:, 0].max():.6f}, mean: {pred_norm[:, 0].mean():.6f}")
         
-        # CRITICAL: Denormalize to get real feature values
         pred_denorm = self.denormalize_prediction(pred_norm)
-        logger.info(f"After denormalization:")
-        logger.info(f"  Returns range: [{pred_denorm[:, 0].min():.6f}, {pred_denorm[:, 0].max():.6f}]")
-        logger.info(f"  Avg return: {pred_denorm[:, 0].mean():.6f}")
+        logger.info(f"After denormalization (real scale):")
+        logger.info(f"  Returns - min: {pred_denorm[:, 0].min():.6f}, max: {pred_denorm[:, 0].max():.6f}, mean: {pred_denorm[:, 0].mean():.6f}")
+        logger.info(f"  high_low_ratio - min: {pred_denorm[:, 1].min():.6f}, max: {pred_denorm[:, 1].max():.6f}")
+        logger.info(f"  Volume_Ratio - min: {pred_denorm[:, 13].min():.6f}, max: {pred_denorm[:, 13].max():.6f}")
         
         last_candle = {
             'time': pd.to_datetime(df_original.iloc[-1]['open_time']),
@@ -279,15 +260,16 @@ class RollingPredictor:
             volatility_multiplier=volatility_multiplier
         )
         
-        # Log prediction summary
         if klines:
             closes = [k['close'] for k in klines]
-            returns_gen = [(closes[i] - closes[i-1]) / closes[i-1] if i > 0 else 0 for i in range(len(closes))]
-            logger.info(f"\nGenerated K-lines:")
-            logger.info(f"  Price range: ${min(closes):.2f} - ${max(closes):.2f}")
-            logger.info(f"  Avg predicted return: {np.mean(returns_gen):.4f}")
-            logger.info(f"  Returns std: {np.std(returns_gen):.4f}")
-            logger.info(f"{'='*60}\n")
+            highs = [k['high'] for k in klines]
+            lows = [k['low'] for k in klines]
+            logger.info(f"Generated K-lines summary:")
+            logger.info(f"  Price range: ${min(lows):.2f} - ${max(highs):.2f}")
+            logger.info(f"  Close range: ${min(closes):.2f} - ${max(closes):.2f}")
+            logger.info(f"  First: O={klines[0]['open']:.2f} C={klines[0]['close']:.2f}")
+            logger.info(f"  Last: O={klines[-1]['open']:.2f} C={klines[-1]['close']:.2f}")
+            logger.info(f"{'='*60}")
         
         return klines
 
@@ -321,11 +303,9 @@ class MultiStepPredictor(RollingPredictor):
         X_current = X_initial.copy()
         
         for step in range(num_steps):
-            # Predict next 15 bars
             pred_norm = self.predict_single_step(X_current)
             predictions.append(pred_norm)
             
-            # Roll the window: remove oldest 15 bars, add new 15 predictions
             X_current = np.vstack([X_current[step_size:], pred_norm])
             
             logger.info(f"Recursive step {step + 1}/{num_steps} completed")
