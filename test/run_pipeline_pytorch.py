@@ -182,59 +182,88 @@ def step_6_train_model(model, X_train, y_train, X_val, y_val, config, device):
     
     return model
 
-def predict_in_batches(model, X, batch_size=256, device='cuda'):
+def predict_in_batches(model, X, batch_size=4, device='cuda'):
     """
-    Make predictions in batches to avoid memory issues
+    Make predictions in very small batches to avoid memory issues
     
     Args:
         model: Trained model
         X: Input data as numpy array
-        batch_size: Batch size for prediction
+        batch_size: Batch size for prediction (very small for memory efficiency)
         device: Device to use
         
     Returns:
         Predictions as numpy array
     """
     predictions = []
+    total_samples = len(X)
     
-    # Convert to tensor
+    # Convert to tensor on CPU first
     X_tensor = torch.tensor(X, dtype=torch.float32)
     
-    # Process in batches
-    for i in range(0, len(X_tensor), batch_size):
-        batch = X_tensor[i:i+batch_size].to(device)
+    logger.info(f"Predicting {total_samples} samples with batch_size={batch_size}")
+    
+    # Process in very small batches
+    for i in range(0, total_samples, batch_size):
+        batch_end = min(i + batch_size, total_samples)
+        batch = X_tensor[i:batch_end].to(device)
         
-        with torch.no_grad():
-            batch_pred = model(batch)
+        try:
+            with torch.no_grad():
+                batch_pred = model(batch)
+            predictions.append(batch_pred.cpu().numpy())
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                logger.warning(f"OOM at batch {i//batch_size}, trying with smaller batch")
+                # Try again with half the batch size
+                for j in range(i, batch_end):
+                    single = X_tensor[j:j+1].to(device)
+                    with torch.no_grad():
+                        pred = model(single)
+                    predictions.append(pred.cpu().numpy())
+            else:
+                raise
         
-        predictions.append(batch_pred.cpu().numpy())
-        
-        # Free memory
+        # Free memory after each batch
         del batch
-        gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        
+        # Progress indicator
+        if (i // batch_size + 1) % 100 == 0:
+            logger.info(f"Processed {min(i + batch_size, total_samples)}/{total_samples} samples")
     
+    logger.info(f"Prediction complete")
     return np.concatenate(predictions, axis=0)
 
 def step_7_evaluate_model(model, X_train, y_train, X_val, y_val, X_test, y_test, config, device):
     """
-    Step 7: Evaluate model on all sets (with batch processing to save memory)
+    Step 7: Evaluate model on all sets (with aggressive memory management)
     """
     print_section("STEP 7: Evaluating Model")
     
     evaluator = Evaluator(results_dir=config['paths']['results_dir'])
     
-    batch_size = config['model']['batch_size']
+    # Use very small batch size for evaluation to avoid OOM
+    eval_batch_size = 4
     
     logger.info("Making predictions on training set...")
-    y_train_pred = predict_in_batches(model, X_train, batch_size=batch_size, device=device)
+    y_train_pred = predict_in_batches(model, X_train, batch_size=eval_batch_size, device=device)
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     
     logger.info("Making predictions on validation set...")
-    y_val_pred = predict_in_batches(model, X_val, batch_size=batch_size, device=device)
+    y_val_pred = predict_in_batches(model, X_val, batch_size=eval_batch_size, device=device)
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     
     logger.info("Making predictions on test set...")
-    y_test_pred = predict_in_batches(model, X_test, batch_size=batch_size, device=device)
+    y_test_pred = predict_in_batches(model, X_test, batch_size=eval_batch_size, device=device)
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     
     logger.info("--- Training Set Metrics ---")
     evaluator.calculate_metrics(y_train, y_train_pred)
