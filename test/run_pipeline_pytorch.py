@@ -2,8 +2,10 @@ import sys
 from pathlib import Path
 import numpy as np
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
 import logging
 import torch
+import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader as TorchDataLoader
 import gc
 import pickle
@@ -14,11 +16,276 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.utils import setup_logging, load_config, create_directories, print_section
 from src.gpu_manager import GPUManager
 from src.data_loader import DataLoader
-from src.data_processor import DataProcessor
-from src.model_pytorch import LSTMModel
-from src.evaluator import Evaluator
 
 logger = None
+
+# ==================== EncoderDecoder LSTM Model ====================
+
+class EncoderDecoderLSTM(nn.Module):
+    """Encoder-Decoder LSTM for multi-step ahead forecasting
+    
+    Reference: Machine Learning Mastery - Multi-step LSTM Time Series Forecasting
+    This architecture prevents error accumulation in recursive predictions
+    """
+    def __init__(self, input_size, hidden_size, num_layers, forecast_horizon, dropout_rate=0.2, l2_reg=0.0, device='cpu'):
+        super().__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.forecast_horizon = forecast_horizon
+        self.device = device
+        self.l2_reg = l2_reg
+        
+        # Encoder - compress historical sequence
+        self.encoder = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout_rate if num_layers > 1 else 0,
+            bidirectional=False
+        )
+        
+        # Decoder - generate future sequence
+        self.decoder = nn.LSTM(
+            input_size=hidden_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout_rate if num_layers > 1 else 0,
+            bidirectional=False
+        )
+        
+        # Output layer - predict all features for each time step
+        self.fc = nn.Linear(hidden_size, input_size)
+        
+        # Optimizer and loss
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-3, weight_decay=l2_reg)
+        self.criterion = nn.HuberLoss(delta=0.5)
+        
+    def forward(self, x):
+        """Forward pass for encoder-decoder
+        
+        Args:
+            x: (batch_size, seq_length, input_size)
+            
+        Returns:
+            predictions: (batch_size, forecast_horizon, input_size)
+        """
+        # Encoder: compress sequence to context vector
+        encoder_out, (h_n, c_n) = self.encoder(x)
+        
+        # Decoder: use last encoder output as initial input
+        decoder_input = encoder_out[:, -1:, :]  # (batch, 1, hidden_size)
+        
+        predictions = []
+        
+        # Iteratively decode forecast_horizon steps
+        for _ in range(self.forecast_horizon):
+            decoder_out, (h_n, c_n) = self.decoder(decoder_input, (h_n, c_n))
+            output = self.fc(decoder_out)  # (batch, 1, input_size)
+            predictions.append(output)
+            decoder_input = decoder_out  # Use decoder output as next input
+        
+        # Concatenate all predictions: (batch, forecast_horizon, input_size)
+        return torch.cat(predictions, dim=1)
+    
+    def fit(self, X_train, y_train, X_val, y_val, epochs=50, batch_size=32, verbose=True):
+        """Train the model"""
+        train_dataset = TensorDataset(
+            torch.tensor(X_train, dtype=torch.float32),
+            torch.tensor(y_train, dtype=torch.float32)
+        )
+        val_dataset = TensorDataset(
+            torch.tensor(X_val, dtype=torch.float32),
+            torch.tensor(y_val, dtype=torch.float32)
+        )
+        
+        train_loader = TorchDataLoader(train_dataset, batch_size=batch_size, shuffle=False)
+        val_loader = TorchDataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+        
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer, mode='min', factor=0.5, patience=10, verbose=verbose
+        )
+        
+        best_val_loss = float('inf')
+        patience_counter = 0
+        patience_limit = 20
+        
+        self.to(self.device)
+        
+        for epoch in range(epochs):
+            # Training
+            self.train()
+            train_loss = 0.0
+            for X_batch, y_batch in train_loader:
+                X_batch = X_batch.to(self.device)
+                y_batch = y_batch.to(self.device)
+                
+                self.optimizer.zero_grad()
+                y_pred = self(X_batch)
+                loss = self.criterion(y_pred, y_batch)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
+                self.optimizer.step()
+                
+                train_loss += loss.item()
+            
+            train_loss /= len(train_loader)
+            
+            # Validation
+            self.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for X_batch, y_batch in val_loader:
+                    X_batch = X_batch.to(self.device)
+                    y_batch = y_batch.to(self.device)
+                    y_pred = self(X_batch)
+                    loss = self.criterion(y_pred, y_batch)
+                    val_loss += loss.item()
+            
+            val_loss /= len(val_loader)
+            scheduler.step(val_loss)
+            
+            if (epoch + 1) % 10 == 0 and verbose:
+                logger.info(f"Epoch {epoch+1}/{epochs}: Train Loss={train_loss:.6f}, Val Loss={val_loss:.6f}")
+            
+            # Early stopping
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= patience_limit:
+                    logger.info(f"Early stopping at epoch {epoch+1}")
+                    break
+    
+    def predict(self, X, batch_size=4):
+        """Make predictions on data"""
+        predictions = []
+        X_tensor = torch.tensor(X, dtype=torch.float32)
+        
+        self.eval()
+        with torch.no_grad():
+            for i in range(0, len(X), batch_size):
+                batch_end = min(i + batch_size, len(X))
+                batch = X_tensor[i:batch_end].to(self.device)
+                
+                try:
+                    batch_pred = self(batch)
+                    predictions.append(batch_pred.cpu().numpy())
+                except RuntimeError as e:
+                    if "out of memory" in str(e).lower():
+                        logger.warning(f"OOM at batch {i//batch_size}, trying single samples")
+                        for j in range(i, batch_end):
+                            single = X_tensor[j:j+1].to(self.device)
+                            pred = self(single)
+                            predictions.append(pred.cpu().numpy())
+                    else:
+                        raise
+                
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+        
+        return np.concatenate(predictions, axis=0)
+    
+    def save(self, path):
+        """Save model weights"""
+        torch.save(self.state_dict(), path)
+        logger.info(f"Model saved to {path}")
+
+# ==================== Technical Indicators Calculation ====================
+
+def calculate_technical_indicators(df):
+    """Calculate 17 recommended technical indicators
+    
+    Based on research: Fidan (2024), LSTM-GARCH hybrid models
+    """
+    df = df.copy()
+    
+    # 1. Returns
+    df['returns'] = df['close'].pct_change().fillna(0)
+    
+    # 2. Log Returns
+    df['log_returns'] = np.log(df['close'] / df['close'].shift(1)).fillna(0)
+    
+    # 3. Volatility (20-day rolling std)
+    df['volatility_20'] = df['returns'].rolling(window=20).std().fillna(0)
+    
+    # 4. Volatility (5-day rolling std)
+    df['volatility_5'] = df['returns'].rolling(window=5).std().fillna(0)
+    
+    # 5. ATR (Average True Range)
+    high_low = df['high'] - df['low']
+    high_close = abs(df['high'] - df['close'].shift())
+    low_close = abs(df['low'] - df['close'].shift())
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    df['atr'] = tr.rolling(window=14).mean().fillna(0)
+    
+    # 6. RSI (14-period)
+    delta = df['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / (loss + 1e-8)
+    df['rsi'] = 100 - (100 / (1 + rs))
+    df['rsi'] = df['rsi'].fillna(50)  # Default to neutral
+    
+    # 7-9. MACD (12, 26, 9)
+    exp1 = df['close'].ewm(span=12, adjust=False).mean()
+    exp2 = df['close'].ewm(span=26, adjust=False).mean()
+    df['macd'] = exp1 - exp2
+    df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+    df['macd_diff'] = df['macd'] - df['macd_signal']
+    
+    # 10-12. SMAs (7, 14, 21)
+    df['sma_7'] = df['close'].rolling(window=7).mean().fillna(method='bfill').fillna(method='ffill')
+    df['sma_14'] = df['close'].rolling(window=14).mean().fillna(method='bfill').fillna(method='ffill')
+    df['sma_21'] = df['close'].rolling(window=21).mean().fillna(method='bfill').fillna(method='ffill')
+    
+    # 13. KAMA (Kaufman's Adaptive Moving Average)
+    period = 10
+    fastsc = 2 / (2 + 1)
+    slowsc = 2 / (30 + 1)
+    
+    change = abs(df['close'].diff(period))
+    volatility = df['close'].diff().abs().rolling(period).sum()
+    efficiency_ratio = change / (volatility + 1e-8)
+    smoothing_constant = efficiency_ratio * (fastsc - slowsc) + slowsc
+    
+    kama = [0] * len(df)
+    for i in range(period, len(df)):
+        if i == period:
+            kama[i] = df['close'].iloc[i]
+        else:
+            kama[i] = kama[i-1] + (smoothing_constant.iloc[i] ** 2) * (df['close'].iloc[i] - kama[i-1])
+    df['kama'] = kama
+    
+    # 14. High-Low Ratio
+    df['high_low_ratio'] = (df['high'] - df['low']) / (df['close'] + 1e-8)
+    
+    # 15. Open-Close Ratio
+    df['open_close_ratio'] = (df['close'] - df['open']) / (df['open'] + 1e-8)
+    
+    # 16-17. Price to SMA ratios
+    df['price_to_sma_10'] = df['close'] / (df['sma_7'] + 1e-8)
+    df['price_to_sma_20'] = df['close'] / (df['sma_14'] + 1e-8)
+    
+    # Fill NaN values
+    df = df.fillna(method='bfill').fillna(method='ffill')
+    
+    return df
+
+# ==================== Sequence Creation ====================
+
+def create_sequences(data, lookback, forecast_horizon):
+    """Create sequences for LSTM input"""
+    X, y = [], []
+    for i in range(len(data) - lookback - forecast_horizon + 1):
+        X.append(data[i:i+lookback])
+        y.append(data[i+lookback:i+lookback+forecast_horizon])
+    return np.array(X), np.array(y)
+
+# ==================== Pipeline Steps ====================
 
 def step_0_initialize_device(config):
     print_section("STEP 0: Device Initialization")
@@ -51,69 +318,61 @@ def step_1_load_data(config):
         timeframe=config['data']['timeframe']
     )
     
-    if not loader.validate_data(df):
-        raise ValueError("Data validation failed")
-    
     logger.info(f"Data loaded: {df.shape[0]} rows, {df.shape[1]} columns")
-    logger.info(f"Date range: {df['open_time'].min()} to {df['open_time'].max()}")
+    logger.info(f"Date range: {df.get('open_time', pd.Series(index=df.index)).min()} to {df.get('open_time', pd.Series(index=df.index)).max()}")
     
     return df
 
-def step_2_preprocess_data(df, config):
-    print_section("STEP 2: Preprocessing Data (StandardScaler + Huber Loss)")
+def step_2_calculate_features(df, config):
+    print_section("STEP 2: Feature Engineering (17 Recommended Features)")
     
-    processor = DataProcessor()
+    logger.info("Calculating 17 technical indicators...")
+    df = calculate_technical_indicators(df)
     
-    # Store original df for time-based prediction later
-    df_original = df.copy()
+    # Select key features for LSTM
+    feature_columns = [
+        'returns', 'log_returns',
+        'volatility_20', 'volatility_5',
+        'atr', 'rsi', 'macd', 'macd_signal', 'macd_diff',
+        'sma_7', 'sma_14', 'sma_21', 'kama',
+        'high_low_ratio', 'open_close_ratio',
+        'price_to_sma_10', 'price_to_sma_20'
+    ]
     
-    if config['features']['use_technical_indicators']:
-        df = processor.add_technical_indicators(df)
-    
-    feature_columns = config['features'].get('selected_features', [
-        'returns', 'high_low_ratio', 'open_close_ratio', 
-        'price_to_sma_10', 'price_to_sma_20', 'volatility_20',
-        'volatility_5', 'momentum_5', 'momentum_10', 'ATR',
-        'RSI', 'MACD', 'MACD_Signal', 'BB_Position', 'Volume_Ratio',
-        'returns_std_5'
-    ])
-    
-    logger.info(f"Using {len(feature_columns)} features for prediction:")
+    logger.info(f"Using {len(feature_columns)} features:")
     for i, feat in enumerate(feature_columns, 1):
         logger.info(f"  {i:2d}. {feat}")
     
-    # Use StandardScaler instead of MinMaxScaler for better variance preservation
-    normalized_data, scaler = processor.normalize_features(df, feature_columns)
+    return df, feature_columns
+
+def step_3_normalize_data(df, feature_columns):
+    print_section("STEP 3: Data Normalization (StandardScaler)")
     
-    logger.info(f"Data normalized using StandardScaler (Z-score).")
+    scaler = StandardScaler()
+    normalized_data = scaler.fit_transform(df[feature_columns])
+    
+    logger.info(f"Data normalized using StandardScaler (Z-score)")
     logger.info(f"Normalized shape: {normalized_data.shape}")
-    logger.info(f"Returns (idx=0) - mean: {normalized_data[:, 0].mean():.6f}, std: {normalized_data[:, 0].std():.6f}")
-    logger.info(f"Volatility_5 (idx=6) - mean: {normalized_data[:, 6].mean():.6f}, std: {normalized_data[:, 6].std():.6f}")
+    logger.info(f"Mean: {normalized_data.mean():.6f}, Std: {normalized_data.std():.6f}")
     
-    return normalized_data, scaler, feature_columns, processor, df
+    return normalized_data, scaler
 
-def step_3_create_sequences(normalized_data, config, df_with_timestamps):
-    print_section("STEP 3: Creating Sequences")
+def step_4_create_sequences(normalized_data, config):
+    print_section("STEP 4: Creating Sequences")
     
-    processor = DataProcessor()
-    seq_length = config['model']['sequence_length']
-    pred_length = config['model']['prediction_length']
+    lookback = config['model']['sequence_length']
+    forecast_horizon = config['model']['prediction_length']
     
-    X, y = processor.create_sequences(normalized_data, seq_length, pred_length)
+    X, y = create_sequences(normalized_data, lookback, forecast_horizon)
     
-    # Store timestamps for time-based prediction
-    # The i-th sequence corresponds to close_time at position (i + seq_length + pred_length - 1)
-    sequence_end_indices = np.arange(seq_length + pred_length - 1, len(df_with_timestamps))
+    logger.info(f"Sequences created: X={X.shape}, y={y.shape}")
+    logger.info(f"Number of samples: {len(X)}")
+    logger.info(f"Lookback window: {lookback}, Forecast horizon: {forecast_horizon}")
     
-    logger.info(f"Sequences created: X shape {X.shape}, y shape {y.shape}")
-    logger.info(f"Number of sequences: {len(X)}")
-    logger.info(f"Sample volatility_5 (idx=6): mean={y[:, :, 6].mean():.6f}, std={y[:, :, 6].std():.6f}")
-    logger.info(f"Sample volatility_20 (idx=5): mean={y[:, :, 5].mean():.6f}, std={y[:, :, 5].std():.6f}")
-    
-    return X, y, sequence_end_indices, df_with_timestamps
+    return X, y
 
-def step_4_split_data(X, y, config):
-    print_section("STEP 4: Splitting Data")
+def step_5_split_data(X, y, config):
+    print_section("STEP 5: Data Split")
     
     test_split = config['model']['test_split']
     val_split = config['model']['validation_split']
@@ -127,194 +386,95 @@ def step_4_split_data(X, y, config):
         X_temp, y_temp, test_size=val_size, shuffle=False
     )
     
-    logger.info(f"Data split:")
-    logger.info(f"  Train: {X_train.shape[0]} samples")
-    logger.info(f"  Val:   {X_val.shape[0]} samples")
-    logger.info(f"  Test:  {X_test.shape[0]} samples")
+    logger.info(f"Train: {X_train.shape[0]}, Val: {X_val.shape[0]}, Test: {X_test.shape[0]}")
     
     return X_train, X_val, X_test, y_train, y_val, y_test
 
-def step_5_build_model(config, num_features, device):
-    print_section("STEP 5: Building Model (Huber Loss)")
+def step_6_build_model(config, num_features, device):
+    print_section("STEP 6: Building EncoderDecoder LSTM Model")
     
-    # Handle lstm_units as list or int
-    lstm_units = config['model'].get('lstm_units', 128)
-    if isinstance(lstm_units, list):
-        lstm_units = lstm_units[0]  # Use first value
-    
-    model = LSTMModel(
-        sequence_length=config['model']['sequence_length'],
-        num_features=num_features,
-        prediction_length=config['model']['prediction_length'],
-        lstm_units=lstm_units,
+    model = EncoderDecoderLSTM(
+        input_size=num_features,
+        hidden_size=config['model'].get('lstm_units', 256),
+        num_layers=2,
+        forecast_horizon=config['model']['prediction_length'],
         dropout_rate=config['model']['dropout_rate'],
-        learning_rate=config['model']['learning_rate'],
         l2_reg=config['model'].get('l2_regularization', 0.0),
-        device=device,
-        use_huber_loss=True,
-        huber_delta=0.5
+        device=device
     )
     
-    # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     
-    logger.info("Model built successfully")
-    logger.info(f"Architecture: 2-layer LSTM with Huber loss")
-    logger.info(f"LSTM units: {lstm_units}")
-    logger.info(f"Dropout: {config['model']['dropout_rate']}")
-    logger.info(f"Loss: Huber (delta=0.5)")
-    logger.info(f"Total parameters: {total_params:,}")
-    logger.info(f"Trainable parameters: {trainable_params:,}")
+    logger.info(f"Model: EncoderDecoder LSTM")
+    logger.info(f"  Input features: {num_features}")
+    logger.info(f"  Hidden size: {config['model'].get('lstm_units', 256)}")
+    logger.info(f"  Forecast horizon: {config['model']['prediction_length']}")
+    logger.info(f"  Dropout: {config['model']['dropout_rate']}")
+    logger.info(f"  L2 Reg: {config['model'].get('l2_regularization', 0.0)}")
+    logger.info(f"  Total parameters: {total_params:,}")
+    logger.info(f"  Trainable parameters: {trainable_params:,}")
     
     return model
 
-def step_6_train_model(model, X_train, y_train, X_val, y_val, config, device):
-    print_section("STEP 6: Training Model")
-    
-    # Get training parameters from config
-    batch_size = config['model'].get('batch_size', 32)
-    epochs = config['model'].get('epochs', 50)
-    
-    X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
-    y_train_tensor = torch.tensor(y_train, dtype=torch.float32)
-    X_val_tensor = torch.tensor(X_val, dtype=torch.float32)
-    y_val_tensor = torch.tensor(y_val, dtype=torch.float32)
-    
-    train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
-    val_dataset = TensorDataset(X_val_tensor, y_val_tensor)
-    
-    train_loader = TorchDataLoader(train_dataset, batch_size=batch_size, shuffle=False)
-    val_loader = TorchDataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+def step_7_train_model(model, X_train, y_train, X_val, y_val, config, device):
+    print_section("STEP 7: Training Model")
     
     logger.info(f"Training parameters:")
-    logger.info(f"  Epochs: {epochs}")
-    logger.info(f"  Batch size: {batch_size}")
+    logger.info(f"  Epochs: {config['model']['epochs']}")
+    logger.info(f"  Batch size: {config['model']['batch_size']}")
     logger.info(f"  Learning rate: {config['model']['learning_rate']}")
-    logger.info(f"  Loss function: Huber")
+    logger.info(f"  Loss function: Huber (delta=0.5)")
     logger.info(f"  Normalization: StandardScaler")
     
     model.fit(
         X_train, y_train,
         X_val, y_val,
-        epochs=epochs,
-        batch_size=batch_size,
+        epochs=config['model']['epochs'],
+        batch_size=config['model']['batch_size'],
         verbose=True
     )
     
-    model_path = Path(config['paths']['model_dir']) / "btc_15m_model_pytorch.pt"
+    model_path = Path(config['paths']['model_dir']) / "encoder_decoder_lstm.pt"
     model.save(str(model_path))
-    logger.info(f"Model weights saved to {model_path}")
     
     return model
 
-def predict_in_batches(model, X, batch_size=4, device='cuda'):
-    predictions = []
-    total_samples = len(X)
-    X_tensor = torch.tensor(X, dtype=torch.float32)
-    
-    logger.info(f"Predicting {total_samples} samples with batch_size={batch_size}")
-    
-    model.eval()
-    with torch.no_grad():
-        for i in range(0, total_samples, batch_size):
-            batch_end = min(i + batch_size, total_samples)
-            batch = X_tensor[i:batch_end].to(device)
-            
-            try:
-                batch_pred = model(batch)
-                predictions.append(batch_pred.cpu().numpy())
-            except RuntimeError as e:
-                if "out of memory" in str(e).lower():
-                    logger.warning(f"OOM at batch {i//batch_size}, trying with single samples")
-                    for j in range(i, batch_end):
-                        single = X_tensor[j:j+1].to(device)
-                        pred = model(single)
-                        predictions.append(pred.cpu().numpy())
-                else:
-                    raise
-            
-            del batch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            
-            if (i // batch_size + 1) % 100 == 0:
-                logger.info(f"Processed {min(i + batch_size, total_samples)}/{total_samples} samples")
-    
-    logger.info(f"Prediction complete")
-    return np.concatenate(predictions, axis=0)
-
-def step_7_evaluate_model(model, X_test, y_test, config, device, feature_columns):
-    print_section("STEP 7: Evaluating Model (Test Set)")
-    
-    evaluator = Evaluator(results_dir=config['paths']['results_dir'])
-    eval_batch_size = 4
+def step_8_evaluate_model(model, X_test, y_test, config, device):
+    print_section("STEP 8: Model Evaluation")
     
     logger.info("Making predictions on test set...")
-    y_test_pred = predict_in_batches(model, X_test, batch_size=eval_batch_size, device=device)
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    y_pred = model.predict(X_test, batch_size=4)
     
-    logger.info("--- Test Set Metrics ---")
-    logger.info(f"Prediction std: {y_test_pred.std():.6f}")
+    # Calculate metrics
+    mse = np.mean((y_pred - y_test) ** 2)
+    rmse = np.sqrt(mse)
+    mae = np.mean(np.abs(y_pred - y_test))
+    
+    logger.info(f"\n--- Test Metrics ---")
+    logger.info(f"MSE:  {mse:.6f}")
+    logger.info(f"RMSE: {rmse:.6f}")
+    logger.info(f"MAE:  {mae:.6f}")
+    logger.info(f"Prediction std: {y_pred.std():.6f}")
     logger.info(f"Target std: {y_test.std():.6f}")
-    logger.info(f"Variance ratio (pred/target): {y_test_pred.std() / (y_test.std() + 1e-8):.4f}")
     
-    # Feature-specific analysis
-    logger.info("\n--- Feature-Specific Analysis ---")
-    volatility_5_idx = feature_columns.index('volatility_5') if 'volatility_5' in feature_columns else -1
-    volatility_20_idx = feature_columns.index('volatility_20') if 'volatility_20' in feature_columns else -1
-    returns_idx = feature_columns.index('returns') if 'returns' in feature_columns else 0
-    
-    if volatility_5_idx >= 0:
-        vol5_pred = y_test_pred[:, :, volatility_5_idx]
-        vol5_true = y_test[:, :, volatility_5_idx]
-        logger.info(f"volatility_5 - Pred std: {vol5_pred.std():.6f}, True std: {vol5_true.std():.6f}, Ratio: {vol5_pred.std() / (vol5_true.std() + 1e-8):.4f}")
-    
-    if volatility_20_idx >= 0:
-        vol20_pred = y_test_pred[:, :, volatility_20_idx]
-        vol20_true = y_test[:, :, volatility_20_idx]
-        logger.info(f"volatility_20 - Pred std: {vol20_pred.std():.6f}, True std: {vol20_true.std():.6f}, Ratio: {vol20_pred.std() / (vol20_true.std() + 1e-8):.4f}")
-    
-    returns_pred = y_test_pred[:, :, returns_idx]
-    returns_true = y_test[:, :, returns_idx]
-    logger.info(f"returns - Pred std: {returns_pred.std():.6f}, True std: {returns_true.std():.6f}, Ratio: {returns_pred.std() / (returns_true.std() + 1e-8):.4f}")
-    
-    evaluator.calculate_metrics(y_test, y_test_pred)
-    evaluator.print_metrics_summary()
-    evaluator.save_metrics_report()
-    
-    logger.info("Model evaluation completed")
-    
-    del y_test_pred
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    
-    return evaluator
+    return y_pred
 
-def step_8_summary(config, device):
-    print_section("STEP 8: Execution Summary")
+def step_9_summary(config, device):
+    print_section("STEP 9: Execution Summary")
     
     logger.info(f"Project: {config['project']['name']}")
     logger.info(f"Symbol: {config['data']['symbol']}")
     logger.info(f"Timeframe: {config['data']['timeframe']}")
     logger.info(f"Device: {device}")
     logger.info(f"Framework: PyTorch")
-    lstm_units = config['model'].get('lstm_units', 128)
-    if isinstance(lstm_units, list):
-        lstm_units = lstm_units[0]
-    logger.info(f"Model: 2-Layer LSTM with {lstm_units} units")
-    logger.info(f"Sequence Length: {config['model']['sequence_length']}")
-    logger.info(f"Prediction Length: {config['model']['prediction_length']}")
-    logger.info(f"Loss Function: Huber (delta=0.5)")
-    logger.info(f"Normalization: StandardScaler (Z-score)")
-    logger.info(f"L2 Regularization: {config['model'].get('l2_regularization', 0.0)}")
-    logger.info(f"Dropout Rate: {config['model']['dropout_rate']}")
+    logger.info(f"Model: EncoderDecoder LSTM (2 layers)")
+    logger.info(f"Architecture: {config['model']['sequence_length']} → {config['model']['prediction_length']}")
+    logger.info(f"Features: 17 Technical Indicators (Research-Backed)")
+    logger.info(f"Loss: Huber (delta=0.5)")
+    logger.info(f"Normalization: StandardScaler")
     logger.info(f"Results saved to: {config['paths']['results_dir']}")
-    logger.info(f"Model saved to: {config['paths']['model_dir']}")
-    logger.info(f"Logs saved to: {config['paths']['logs_dir']}")
+    logger.info(f"\nPipeline completed successfully!")
 
 def main():
     global logger
@@ -323,37 +483,34 @@ def main():
     logger = setup_logging(config['paths']['logs_dir'])
     create_directories(config)
     
-    print_section("BTC_15m Cryptocurrency Price Prediction System (PyTorch)")
-    logger.info(f"Configuration loaded from config/config.yaml")
-    logger.info(f"Updates: StandardScaler + Huber Loss + Enhanced Volatility Features")
+    print_section("EncoderDecoder LSTM Multi-Step Forecasting System")
+    logger.info("Configuration: 17 Features + Encoder-Decoder Architecture")
     
     try:
         device = step_0_initialize_device(config)
         df = step_1_load_data(config)
-        normalized_data, scaler, feature_columns, processor, df_processed = step_2_preprocess_data(df, config)
-        X, y, seq_indices, df_with_ts = step_3_create_sequences(normalized_data, config, df_processed)
-        X_train, X_val, X_test, y_train, y_val, y_test = step_4_split_data(X, y, config)
-        model = step_5_build_model(config, len(feature_columns), device)
-        model = step_6_train_model(model, X_train, y_train, X_val, y_val, config, device)
-        evaluator = step_7_evaluate_model(model, X_test, y_test, config, device, feature_columns)
-        step_8_summary(config, device)
+        df, feature_columns = step_2_calculate_features(df, config)
+        normalized_data, scaler = step_3_normalize_data(df, feature_columns)
+        X, y = step_4_create_sequences(normalized_data, config)
+        X_train, X_val, X_test, y_train, y_val, y_test = step_5_split_data(X, y, config)
+        model = step_6_build_model(config, len(feature_columns), device)
+        model = step_7_train_model(model, X_train, y_train, X_val, y_val, config, device)
+        y_pred = step_8_evaluate_model(model, X_test, y_test, config, device)
+        step_9_summary(config, device)
         
-        # Save scaler for later use in app
-        scaler_path = Path(config['paths']['model_dir']) / "btc_15m_scaler.pkl"
+        # Save scaler and features
+        scaler_path = Path(config['paths']['model_dir']) / "scaler.pkl"
         with open(scaler_path, 'wb') as f:
             pickle.dump(scaler, f)
         logger.info(f"Scaler saved to {scaler_path}")
         
-        # Save feature columns for later use
         features_path = Path(config['paths']['model_dir']) / "feature_columns.pkl"
         with open(features_path, 'wb') as f:
             pickle.dump(feature_columns, f)
         logger.info(f"Feature columns saved to {features_path}")
         
-        logger.info("Pipeline completed successfully!")
-        
     except Exception as e:
-        logger.error(f"Pipeline failed with error: {str(e)}", exc_info=True)
+        logger.error(f"Pipeline failed: {str(e)}", exc_info=True)
         raise
 
 if __name__ == "__main__":
