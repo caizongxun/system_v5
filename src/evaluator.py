@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import logging
 from pathlib import Path
 from typing import Dict, Tuple
+import torch
 
 logger = logging.getLogger(__name__)
 
@@ -121,31 +122,40 @@ class Evaluator:
     
     def plot_training_history(self, history, save_path: str = None):
         """
-        Plot training history
+        Plot training history (supports both PyTorch dict and Keras history)
         
         Args:
-            history: Training history from model.fit()
+            history: Training history dict or Keras history object
             save_path: Path to save plot
         """
-        fig, axes = plt.subplots(1, 2, figsize=(14, 4))
+        fig, axes = plt.subplots(1, 1, figsize=(14, 4))
         fig.suptitle('Training History', fontsize=14)
         
-        axes[0].plot(history.history['loss'], label='Train Loss')
-        axes[0].plot(history.history['val_loss'], label='Val Loss')
-        axes[0].set_title('Loss (MSE)')
-        axes[0].set_xlabel('Epoch')
-        axes[0].set_ylabel('Loss')
-        axes[0].legend()
-        axes[0].grid(True)
-        axes[0].set_yscale('log')
-        
-        axes[1].plot(history.history['mae'], label='Train MAE')
-        axes[1].plot(history.history['val_mae'], label='Val MAE')
-        axes[1].set_title('MAE')
-        axes[1].set_xlabel('Epoch')
-        axes[1].set_ylabel('MAE')
-        axes[1].legend()
-        axes[1].grid(True)
+        # Support both PyTorch dict format and Keras history format
+        if isinstance(history, dict):
+            # PyTorch format
+            train_loss = history.get('train_loss', [])
+            val_loss = history.get('val_loss', [])
+            
+            if train_loss and val_loss:
+                epochs = range(1, len(train_loss) + 1)
+                axes.plot(epochs, train_loss, label='Train Loss', marker='o')
+                axes.plot(epochs, val_loss, label='Val Loss', marker='s')
+                axes.set_title('Loss (MSE)')
+                axes.set_xlabel('Epoch')
+                axes.set_ylabel('Loss')
+                axes.legend()
+                axes.grid(True)
+        else:
+            # Keras format (fallback)
+            if hasattr(history, 'history'):
+                axes.plot(history.history.get('loss', []), label='Train Loss')
+                axes.plot(history.history.get('val_loss', []), label='Val Loss')
+                axes.set_title('Loss (MSE)')
+                axes.set_xlabel('Epoch')
+                axes.set_ylabel('Loss')
+                axes.legend()
+                axes.grid(True)
         
         plt.tight_layout()
         
