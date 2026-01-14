@@ -3,6 +3,7 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout, BatchNormalization, Reshape
+from tensorflow.keras.regularizers import L2
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 import logging
@@ -12,7 +13,8 @@ logger = logging.getLogger(__name__)
 
 class LSTMModel:
     def __init__(self, sequence_length: int, num_features: int, prediction_length: int, 
-                 lstm_units: list, dropout_rate: float = 0.2, learning_rate: float = 0.001):
+                 lstm_units: list, dropout_rate: float = 0.2, learning_rate: float = 0.001,
+                 l2_reg: float = 0.0):
         """
         Initialize LSTM model
         
@@ -20,9 +22,10 @@ class LSTMModel:
             sequence_length: Input sequence length (100)
             num_features: Number of features
             prediction_length: Prediction sequence length (15)
-            lstm_units: List of LSTM units [128, 64]
+            lstm_units: List of LSTM units [256, 128, 64]
             dropout_rate: Dropout rate
             learning_rate: Learning rate
+            l2_reg: L2 regularization coefficient
         """
         self.sequence_length = sequence_length
         self.num_features = num_features
@@ -30,34 +33,49 @@ class LSTMModel:
         self.lstm_units = lstm_units
         self.dropout_rate = dropout_rate
         self.learning_rate = learning_rate
+        self.l2_reg = l2_reg
         self.model = None
         self.history = None
     
     def build(self):
         """
-        Build LSTM model architecture
+        Build LSTM model architecture with L2 regularization
         """
-        self.model = Sequential([
-            LSTM(self.lstm_units[0], return_sequences=True, 
-                 input_shape=(self.sequence_length, self.num_features)),
-            BatchNormalization(),
-            Dropout(self.dropout_rate),
-            
-            LSTM(self.lstm_units[1], return_sequences=False),
-            BatchNormalization(),
-            Dropout(self.dropout_rate),
-            
-            Dense(64, activation='relu'),
-            Dropout(self.dropout_rate),
-            
-            Dense(self.prediction_length * self.num_features),
-            Reshape((self.prediction_length, self.num_features))
-        ])
+        self.model = Sequential()
+        
+        self.model.add(LSTM(
+            self.lstm_units[0],
+            return_sequences=True,
+            input_shape=(self.sequence_length, self.num_features),
+            kernel_regularizer=L2(self.l2_reg),
+            recurrent_regularizer=L2(self.l2_reg)
+        ))
+        self.model.add(BatchNormalization())
+        self.model.add(Dropout(self.dropout_rate))
+        
+        for units in self.lstm_units[1:]:
+            self.model.add(LSTM(
+                units,
+                return_sequences=(units != self.lstm_units[-1]),
+                kernel_regularizer=L2(self.l2_reg),
+                recurrent_regularizer=L2(self.l2_reg)
+            ))
+            self.model.add(BatchNormalization())
+            self.model.add(Dropout(self.dropout_rate))
+        
+        self.model.add(Dense(64, activation='relu', kernel_regularizer=L2(self.l2_reg)))
+        self.model.add(Dropout(self.dropout_rate))
+        
+        self.model.add(Dense(
+            self.prediction_length * self.num_features,
+            kernel_regularizer=L2(self.l2_reg)
+        ))
+        self.model.add(Reshape((self.prediction_length, self.num_features)))
         
         self.model.compile(
             optimizer=Adam(learning_rate=self.learning_rate),
             loss='mse',
-            metrics=['mae', 'mape']
+            metrics=['mae']
         )
         
         logger.info("Model built successfully")
@@ -79,7 +97,7 @@ class LSTMModel:
         """
         early_stop = EarlyStopping(
             monitor='val_loss',
-            patience=10,
+            patience=15,
             restore_best_weights=True,
             verbose=1
         )
@@ -88,11 +106,12 @@ class LSTMModel:
             monitor='val_loss',
             factor=0.5,
             patience=5,
-            min_lr=1e-6,
+            min_lr=1e-7,
             verbose=1
         )
         
         logger.info(f"Starting training for {epochs} epochs...")
+        logger.info(f"Training samples: {X_train.shape[0]}, Validation samples: {X_val.shape[0]}")
         
         self.history = self.model.fit(
             X_train, y_train,
