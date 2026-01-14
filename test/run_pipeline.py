@@ -7,12 +7,32 @@ import logging
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.utils import setup_logging, load_config, create_directories, print_section
+from src.gpu_manager import GPUManager
 from src.data_loader import DataLoader
 from src.data_processor import DataProcessor
 from src.model import LSTMModel
 from src.evaluator import Evaluator
 
 logger = None
+
+def step_0_initialize_gpu(config):
+    """
+    Step 0: Initialize GPU configuration
+    """
+    print_section("STEP 0: GPU/CPU Initialization")
+    
+    gpu_manager = GPUManager(
+        memory_growth=config['gpu']['memory_growth'],
+        mixed_precision=config['gpu']['mixed_precision']
+    )
+    
+    device_type = gpu_manager.initialize(
+        memory_limit_gb=config['gpu']['memory_limit_gb']
+    )
+    
+    gpu_manager.print_device_info()
+    
+    return gpu_manager, device_type
 
 def step_1_load_data(config):
     """
@@ -174,7 +194,7 @@ def step_7_evaluate_model(model, X_train, y_train, X_val, y_val, X_test, y_test,
     
     return evaluator
 
-def step_8_summary(config):
+def step_8_summary(config, device_type):
     """
     Step 8: Print summary
     """
@@ -183,6 +203,7 @@ def step_8_summary(config):
     logger.info(f"Project: {config['project']['name']}")
     logger.info(f"Symbol: {config['data']['symbol']}")
     logger.info(f"Timeframe: {config['data']['timeframe']}")
+    logger.info(f"Device: {device_type}")
     logger.info(f"Model: LSTM with {config['model']['lstm_units']} units")
     logger.info(f"Sequence Length: {config['model']['sequence_length']}")
     logger.info(f"Prediction Length: {config['model']['prediction_length']}")
@@ -203,6 +224,8 @@ def main():
     logger.info(f"Configuration loaded from config/config.yaml")
     
     try:
+        gpu_manager, device_type = step_0_initialize_gpu(config)
+        
         df = step_1_load_data(config)
         
         normalized_data, scaler, feature_columns, processor = step_2_preprocess_data(df, config)
@@ -217,7 +240,7 @@ def main():
         
         evaluator = step_7_evaluate_model(model, X_train, y_train, X_val, y_val, X_test, y_test, config)
         
-        step_8_summary(config)
+        step_8_summary(config, device_type)
         
         logger.info("\nPipeline completed successfully!")
         
