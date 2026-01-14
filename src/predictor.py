@@ -74,22 +74,45 @@ class RollingPredictor:
         
         return pred_denorm
     
+    def calculate_market_volatility(self, df_original: pd.DataFrame, periods: int = 20) -> float:
+        """
+        Calculate recent market volatility to determine realistic price movement.
+        
+        Args:
+            df_original: Original OHLCV dataframe
+            periods: Number of periods to calculate volatility over
+            
+        Returns:
+            Volatility as a percentage (e.g., 0.015 for 1.5%)
+        """
+        if len(df_original) < periods:
+            periods = len(df_original)
+        
+        recent_returns = df_original.iloc[-periods:]['close'].pct_change()
+        volatility = recent_returns.std()
+        
+        logger.info(f"Market volatility (last {periods} bars): {volatility:.6f} ({volatility*100:.4f}%)")
+        
+        return max(volatility, 0.0001)
+    
     def generate_klines_from_prediction(
         self, 
         pred_denorm: np.ndarray,
         last_candle: Dict,
         feature_columns: List[str],
-        volatility_multiplier: float = 2.0
+        volatility_multiplier: float = 2.0,
+        market_volatility: float = None
     ) -> List[Dict]:
         """
-        Convert predicted features to K-line OHLCV data with proper OHLC constraints.
-        Uses denormalized predictions directly without artificial constraints.
+        Convert predicted features to K-line OHLCV data.
+        Uses model's predicted returns scaled by market volatility to determine realistic prices.
         
         Args:
             pred_denorm: (15, num_features) denormalized predictions
             last_candle: Previous candle's OHLCV data
             feature_columns: List of feature names
             volatility_multiplier: Multiplier to enhance visible volatility
+            market_volatility: Recent market volatility to scale predictions
             
         Returns:
             List of 15 predicted candles with valid OHLC relationships
@@ -105,8 +128,12 @@ class RollingPredictor:
         volume_ratio_idx = feature_columns.index('Volume_Ratio')
         volatility_5_idx = feature_columns.index('volatility_5')
         
-        logger.info(f"Generating {len(pred_denorm)} K-lines from denormalized predictions")
+        if market_volatility is None:
+            market_volatility = 0.001
+        
+        logger.info(f"Generating {len(pred_denorm)} K-lines from predictions")
         logger.info(f"Last close price: ${current_close:.2f}")
+        logger.info(f"Market volatility baseline: {market_volatility:.6f}")
         
         for i in range(len(pred_denorm)):
             pred_features = pred_denorm[i]
@@ -117,27 +144,31 @@ class RollingPredictor:
             volume_ratio = pred_features[volume_ratio_idx]
             volatility = max(abs(pred_features[volatility_5_idx]), 0.001)
             
-            logger.debug(f"Step {i}: returns={returns:.6f}, high_low_ratio={high_low_ratio:.6f}")
+            # Scale returns by market volatility to get realistic price movements
+            scaled_returns = returns / (market_volatility + 1e-8) if market_volatility > 0 else returns
+            # Cap the scaling to avoid extreme moves
+            scaled_returns = np.clip(scaled_returns * market_volatility * volatility_multiplier, -0.05, 0.05)
             
             open_price = current_close
-            close_price = open_price * (1 + returns)
+            close_price = open_price * (1 + scaled_returns)
             
-            intra_range = abs(high_low_ratio) * abs(close_price)
-            volatility_range = abs(volatility) * abs(open_price) * volatility_multiplier
-            total_range = max(intra_range, volatility_range)
+            # Use actual volatility levels from predictions
+            intra_range = abs(high_low_ratio) * abs(close_price) * volatility_multiplier
+            volatility_range = abs(volatility) * abs(open_price) * volatility_multiplier * 10
+            total_range = max(intra_range, volatility_range, abs(close_price - open_price) * 0.5)
             
             if close_price >= open_price:
-                high_price = max(open_price, close_price) + total_range * 0.5
+                high_price = max(open_price, close_price) + total_range * 0.3
                 low_price = min(open_price, close_price) - total_range * 0.1
             else:
                 high_price = max(open_price, close_price) + total_range * 0.1
-                low_price = min(open_price, close_price) - total_range * 0.5
+                low_price = min(open_price, close_price) - total_range * 0.3
             
             high_price = max(high_price, max(open_price, close_price))
             low_price = min(low_price, min(open_price, close_price))
             
             if high_price <= low_price:
-                high_price = low_price + abs(total_range)
+                high_price = low_price + max(1, abs(total_range))
             
             volume = max(current_volume * np.clip(volume_ratio, 0.3, 3.0), 100)
             
@@ -150,12 +181,13 @@ class RollingPredictor:
                 'volume': float(np.round(volume, 0)),
                 'type': 'predicted',
                 'step': i + 1,
-                'returns': float(returns)
+                'returns': float(returns),
+                'scaled_returns': float(scaled_returns)
             }
             
             klines.append(kline)
             
-            logger.debug(f"Step {i+1}: O={open_price:.2f} H={high_price:.2f} L={low_price:.2f} C={close_price:.2f} Returns={returns:.6f}")
+            logger.debug(f"Step {i+1}: Raw returns={returns:.8f}, Scaled={scaled_returns:.6f}, O={open_price:.2f} C={close_price:.2f}")
             
             current_time += timedelta(minutes=15)
             current_close = close_price
@@ -199,10 +231,13 @@ class RollingPredictor:
             'volume': float(df_original.iloc[-1]['volume'])
         }
         
+        market_vol = self.calculate_market_volatility(df_original)
+        
         klines = self.generate_klines_from_prediction(
             pred_denorm,
             last_candle,
-            self.feature_columns
+            self.feature_columns,
+            market_volatility=market_vol
         )
         
         return klines, pred_norm, pred_denorm
@@ -218,7 +253,7 @@ class RollingPredictor:
         Predict using a fixed baseline (last 100 bars).
         This is used for consistent predictions across time.
         
-        Uses model predictions directly without artificial constraints.
+        Scales model predictions by actual market volatility to generate realistic prices.
         
         Args:
             X_baseline: (100, num_features) fixed baseline (NORMALIZED)
@@ -244,6 +279,9 @@ class RollingPredictor:
         logger.info(f"  high_low_ratio - min: {pred_denorm[:, 1].min():.6f}, max: {pred_denorm[:, 1].max():.6f}")
         logger.info(f"  Volume_Ratio - min: {pred_denorm[:, 13].min():.6f}, max: {pred_denorm[:, 13].max():.6f}")
         
+        # Calculate market volatility to scale predictions
+        market_vol = self.calculate_market_volatility(df_original)
+        
         last_candle = {
             'time': pd.to_datetime(df_original.iloc[-1]['open_time']),
             'open': float(df_original.iloc[-1]['open']),
@@ -257,7 +295,8 @@ class RollingPredictor:
             pred_denorm,
             last_candle,
             self.feature_columns,
-            volatility_multiplier=volatility_multiplier
+            volatility_multiplier=volatility_multiplier,
+            market_volatility=market_vol
         )
         
         if klines:
@@ -269,6 +308,7 @@ class RollingPredictor:
             logger.info(f"  Close range: ${min(closes):.2f} - ${max(closes):.2f}")
             logger.info(f"  First: O={klines[0]['open']:.2f} C={klines[0]['close']:.2f}")
             logger.info(f"  Last: O={klines[-1]['open']:.2f} C={klines[-1]['close']:.2f}")
+            logger.info(f"  Price change: ${klines[0]['close']:.2f} -> ${klines[-1]['close']:.2f} ({(klines[-1]['close']/klines[0]['close']-1)*100:.3f}%)")
             logger.info(f"{'='*60}")
         
         return klines
