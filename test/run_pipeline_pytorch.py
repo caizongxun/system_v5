@@ -19,12 +19,8 @@ from src.evaluator import Evaluator
 logger = None
 
 def step_0_initialize_device(config):
-    """
-    Step 0: Initialize device (GPU/CPU)
-    """
     print_section("STEP 0: Device Initialization")
     
-    # Check CUDA availability
     cuda_available = torch.cuda.is_available()
     device = torch.device('cuda' if cuda_available else 'cpu')
     
@@ -32,20 +28,15 @@ def step_0_initialize_device(config):
         logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
         logger.info(f"CUDA Version: {torch.version.cuda}")
         logger.info(f"cuDNN Version: {torch.backends.cudnn.version()}")
-        # Set cudnn to deterministic mode
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
     else:
         logger.warning("GPU not available. Using CPU.")
     
     logger.info(f"Using device: {device}")
-    
     return device
 
 def step_1_load_data(config):
-    """
-    Step 1: Load data from HuggingFace
-    """
     print_section("STEP 1: Loading Data")
     
     loader = DataLoader(
@@ -67,9 +58,6 @@ def step_1_load_data(config):
     return df
 
 def step_2_preprocess_data(df, config):
-    """
-    Step 2: Preprocess and engineer features
-    """
     print_section("STEP 2: Preprocessing Data")
     
     processor = DataProcessor()
@@ -77,9 +65,11 @@ def step_2_preprocess_data(df, config):
     if config['features']['use_technical_indicators']:
         df = processor.add_technical_indicators(df)
     
-    feature_columns = ['open', 'high', 'low', 'close', 'volume']
-    if config['features']['use_technical_indicators']:
-        feature_columns.extend(['SMA_10', 'SMA_20', 'SMA_50', 'RSI', 'MACD', 'MACD_Signal'])
+    feature_columns = config['features'].get('selected_features', [
+        'returns', 'high_low_ratio', 'open_close_ratio', 
+        'price_to_sma_10', 'price_to_sma_20', 'volatility_20',
+        'RSI', 'MACD', 'MACD_Signal', 'BB_Position', 'Volume_Ratio'
+    ])
     
     logger.info(f"Using {len(feature_columns)} features: {feature_columns}")
     
@@ -90,9 +80,6 @@ def step_2_preprocess_data(df, config):
     return normalized_data, scaler, feature_columns, processor
 
 def step_3_create_sequences(normalized_data, config):
-    """
-    Step 3: Create training sequences
-    """
     print_section("STEP 3: Creating Sequences")
     
     processor = DataProcessor()
@@ -106,9 +93,6 @@ def step_3_create_sequences(normalized_data, config):
     return X, y
 
 def step_4_split_data(X, y, config):
-    """
-    Step 4: Split data into train, validation, test sets
-    """
     print_section("STEP 4: Splitting Data")
     
     test_split = config['model']['test_split']
@@ -131,9 +115,6 @@ def step_4_split_data(X, y, config):
     return X_train, X_val, X_test, y_train, y_val, y_test
 
 def step_5_build_model(config, num_features, device):
-    """
-    Step 5: Build LSTM model
-    """
     print_section("STEP 5: Building Model")
     
     model = LSTMModel(
@@ -153,12 +134,8 @@ def step_5_build_model(config, num_features, device):
     return model
 
 def step_6_train_model(model, X_train, y_train, X_val, y_val, config, device):
-    """
-    Step 6: Train the model
-    """
     print_section("STEP 6: Training Model")
     
-    # Convert to PyTorch tensors
     X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
     y_train_tensor = torch.tensor(y_train, dtype=torch.float32)
     X_val_tensor = torch.tensor(X_val, dtype=torch.float32)
@@ -183,27 +160,12 @@ def step_6_train_model(model, X_train, y_train, X_val, y_val, config, device):
     return model
 
 def predict_in_batches(model, X, batch_size=4, device='cuda'):
-    """
-    Make predictions in very small batches to avoid memory issues
-    
-    Args:
-        model: Trained model
-        X: Input data as numpy array
-        batch_size: Batch size for prediction
-        device: Device to use
-        
-    Returns:
-        Predictions as numpy array
-    """
     predictions = []
     total_samples = len(X)
-    
-    # Convert to tensor on CPU first
     X_tensor = torch.tensor(X, dtype=torch.float32)
     
     logger.info(f"Predicting {total_samples} samples with batch_size={batch_size}")
     
-    # Process in very small batches
     for i in range(0, total_samples, batch_size):
         batch_end = min(i + batch_size, total_samples)
         batch = X_tensor[i:batch_end].to(device)
@@ -215,7 +177,6 @@ def predict_in_batches(model, X, batch_size=4, device='cuda'):
         except RuntimeError as e:
             if "out of memory" in str(e).lower():
                 logger.warning(f"OOM at batch {i//batch_size}, trying with single samples")
-                # Try again with single sample prediction
                 for j in range(i, batch_end):
                     single = X_tensor[j:j+1].to(device)
                     with torch.no_grad():
@@ -224,12 +185,10 @@ def predict_in_batches(model, X, batch_size=4, device='cuda'):
             else:
                 raise
         
-        # Free memory after each batch
         del batch
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         
-        # Progress indicator
         if (i // batch_size + 1) % 100 == 0:
             logger.info(f"Processed {min(i + batch_size, total_samples)}/{total_samples} samples")
     
@@ -237,15 +196,9 @@ def predict_in_batches(model, X, batch_size=4, device='cuda'):
     return np.concatenate(predictions, axis=0)
 
 def step_7_evaluate_model(model, X_test, y_test, config, device):
-    """
-    Step 7: Evaluate model on test set only (memory efficient)
-    Note: Training and validation metrics are already tracked during training via early stopping
-    """
     print_section("STEP 7: Evaluating Model (Test Set)")
     
     evaluator = Evaluator(results_dir=config['paths']['results_dir'])
-    
-    # Use small batch size for evaluation
     eval_batch_size = 4
     
     logger.info("Making predictions on test set...")
@@ -266,7 +219,6 @@ def step_7_evaluate_model(model, X_test, y_test, config, device):
     
     logger.info("Model evaluation completed")
     
-    # Clean up memory
     del y_test_pred
     gc.collect()
     if torch.cuda.is_available():
@@ -275,9 +227,6 @@ def step_7_evaluate_model(model, X_test, y_test, config, device):
     return evaluator
 
 def step_8_summary(config, device):
-    """
-    Step 8: Print summary
-    """
     print_section("STEP 8: Execution Summary")
     
     logger.info(f"Project: {config['project']['name']}")
@@ -298,9 +247,7 @@ def main():
     global logger
     
     config = load_config()
-    
     logger = setup_logging(config['paths']['logs_dir'])
-    
     create_directories(config)
     
     print_section("BTC_15m Cryptocurrency Price Prediction System (PyTorch)")
@@ -308,23 +255,14 @@ def main():
     
     try:
         device = step_0_initialize_device(config)
-        
         df = step_1_load_data(config)
-        
         normalized_data, scaler, feature_columns, processor = step_2_preprocess_data(df, config)
-        
         X, y = step_3_create_sequences(normalized_data, config)
-        
         X_train, X_val, X_test, y_train, y_val, y_test = step_4_split_data(X, y, config)
-        
         model = step_5_build_model(config, len(feature_columns), device)
-        
         model = step_6_train_model(model, X_train, y_train, X_val, y_val, config, device)
-        
         evaluator = step_7_evaluate_model(model, X_test, y_test, config, device)
-        
         step_8_summary(config, device)
-        
         logger.info("\nPipeline completed successfully!")
         
     except Exception as e:
