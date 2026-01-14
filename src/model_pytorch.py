@@ -130,7 +130,7 @@ class LSTMModel(nn.Module):
         Returns:
             Average loss for the epoch
         """
-        self.train()
+        super().train()
         total_loss = 0.0
         
         for batch_x, batch_y in train_loader:
@@ -160,7 +160,7 @@ class LSTMModel(nn.Module):
         Returns:
             Average loss for validation set
         """
-        self.eval()
+        super().eval()
         total_loss = 0.0
         
         with torch.no_grad():
@@ -174,7 +174,7 @@ class LSTMModel(nn.Module):
         
         return total_loss / len(val_loader)
     
-    def train(self, train_loader, val_loader, epochs: int = 50, device=None):
+    def train_model(self, train_loader, val_loader, epochs: int = 50, device=None):
         """
         Train the model
         
@@ -242,7 +242,7 @@ class LSTMModel(nn.Module):
         Returns:
             Predictions as numpy array
         """
-        self.eval()
+        super().eval()
         
         # Convert to tensor if needed
         if isinstance(X, np.ndarray):
