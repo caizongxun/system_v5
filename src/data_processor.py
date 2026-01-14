@@ -38,9 +38,18 @@ class DataProcessor:
         df['price_to_sma_10'] = (df['close'] - df['SMA_10']) / df['SMA_10']
         df['price_to_sma_20'] = (df['close'] - df['SMA_20']) / df['SMA_20']
         
-        # Volatility (relative)
+        # Volatility (rolling standard deviation of returns)
         df['volatility_20'] = df['returns'].rolling(window=20).std()
+        df['volatility_5'] = df['returns'].rolling(window=5).std()  # Short-term volatility
         
+        # Momentum (rate of change)
+        df['momentum_5'] = df['close'].pct_change(periods=5)
+        df['momentum_10'] = df['close'].pct_change(periods=10)
+        
+        # Average True Range (normalized volatility measure)
+        df['ATR'] = self._calculate_atr(df, period=14)
+        
+        # RSI (already captures momentum)
         df['RSI'] = self._calculate_rsi(df['close'], period=14)
         
         macd_result = self._calculate_macd(df['close'])
@@ -57,10 +66,30 @@ class DataProcessor:
         df['Volume_SMA'] = df['volume'].rolling(window=20).mean()
         df['Volume_Ratio'] = df['volume'] / df['Volume_SMA']
         
+        # Standard deviation of returns (volatility prediction helper)
+        df['returns_std_5'] = df['returns'].rolling(window=5).std()
+        
         df = df.dropna()
         logger.info(f"Added technical indicators. Shape after dropna: {df.shape}")
         
         return df
+    
+    def _calculate_atr(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
+        """
+        Calculate Average True Range - normalized measure of volatility
+        """
+        high = df['high']
+        low = df['low']
+        close = df['close']
+        
+        tr1 = high - low
+        tr2 = abs(high - close.shift())
+        tr3 = abs(low - close.shift())
+        
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(window=period).mean() / close
+        
+        return atr
     
     def _calculate_rsi(self, prices: pd.Series, period: int = 14) -> pd.Series:
         """Calculate Relative Strength Index"""
