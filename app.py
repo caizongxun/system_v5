@@ -325,7 +325,7 @@ def main():
             st.markdown("---")
             st.subheader("Detailed Predictions")
             pred_df = display_prediction_table(predicted_klines)
-            st.dataframe(pred_df, use_container_width=True)
+            st.dataframe(pred_df, width='stretch')
         
         if show_metrics:
             st.markdown("---")
