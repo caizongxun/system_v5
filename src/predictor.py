@@ -58,15 +58,17 @@ class RollingPredictor:
         self, 
         pred_denorm: np.ndarray,
         last_candle: Dict,
-        feature_columns: List[str]
+        feature_columns: List[str],
+        volatility_multiplier: float = 2.0
     ) -> List[Dict]:
         """
-        Convert predicted features to K-line OHLCV data
+        Convert predicted features to K-line OHLCV data with enhanced volatility
         
         Args:
             pred_denorm: (15, num_features) denormalized predictions
             last_candle: Previous candle's OHLCV data
             feature_columns: List of feature names
+            volatility_multiplier: Multiplier to enhance visible volatility (default 2.0)
             
         Returns:
             List of 15 predicted candles
@@ -81,6 +83,12 @@ class RollingPredictor:
         high_low_ratio_idx = feature_columns.index('high_low_ratio')
         open_close_ratio_idx = feature_columns.index('open_close_ratio')
         volume_ratio_idx = feature_columns.index('Volume_Ratio')
+        volatility_5_idx = feature_columns.index('volatility_5')
+        volatility_20_idx = feature_columns.index('volatility_20')
+        
+        # Calculate average volatility from predictions to inform range
+        avg_volatility_5 = np.mean([pred_denorm[i][volatility_5_idx] for i in range(len(pred_denorm))])
+        avg_volatility_20 = np.mean([pred_denorm[i][volatility_20_idx] for i in range(len(pred_denorm))])
         
         for i in range(len(pred_denorm)):
             pred_features = pred_denorm[i]
@@ -90,18 +98,35 @@ class RollingPredictor:
             high_low_ratio = pred_features[high_low_ratio_idx]
             open_close_ratio = pred_features[open_close_ratio_idx]
             volume_ratio = pred_features[volume_ratio_idx]
+            volatility_5 = pred_features[volatility_5_idx]
+            volatility_20 = pred_features[volatility_20_idx]
             
-            # Reconstruct OHLCV
+            # Reconstruct basic OHLCV
             open_price = current_close
             close_price = open_price * (1 + returns)
             
-            # Price range based on predicted high_low_ratio
-            price_range = abs(high_low_ratio) * close_price
-            high_price = max(open_price, close_price) + price_range / 2
-            low_price = min(open_price, close_price) - price_range / 2
+            # Enhanced price range calculation
+            # Use both high_low_ratio and volatility features to determine range
+            base_range = abs(high_low_ratio) * close_price
+            volatility_range = max(volatility_5, volatility_20) * close_price * volatility_multiplier
+            price_range = max(base_range, volatility_range)
+            
+            # Place high and low based on direction of returns
+            if returns > 0:
+                # Price went up: high is above close, low between open and close
+                high_price = max(open_price, close_price) + price_range * 0.6
+                low_price = min(open_price, close_price) - price_range * 0.4
+            else:
+                # Price went down: low is below close, high between open and close
+                high_price = max(open_price, close_price) + price_range * 0.4
+                low_price = min(open_price, close_price) - price_range * 0.6
+            
+            # Ensure realistic bounds
+            high_price = max(high_price, max(open_price, close_price))
+            low_price = min(low_price, min(open_price, close_price))
             
             # Volume based on predicted ratio
-            volume = current_volume * max(0.5, volume_ratio)  # At least 50% of current
+            volume = current_volume * max(0.5, volume_ratio)
             
             klines.append({
                 'time': current_time,
@@ -172,7 +197,8 @@ class RollingPredictor:
         self,
         X_baseline: np.ndarray,
         df_original: pd.DataFrame,
-        pred_steps: int = 15
+        pred_steps: int = 15,
+        volatility_multiplier: float = 2.0
     ) -> List[Dict]:
         """
         Predict using a fixed baseline (last 100 bars).
@@ -182,6 +208,7 @@ class RollingPredictor:
             X_baseline: (100, num_features) fixed baseline
             df_original: Original OHLCV dataframe
             pred_steps: Prediction horizon
+            volatility_multiplier: Multiplier to enhance visible volatility
             
         Returns:
             List of predicted klines
@@ -201,7 +228,8 @@ class RollingPredictor:
         klines = self.generate_klines_from_prediction(
             pred_denorm,
             last_candle,
-            self.feature_columns
+            self.feature_columns,
+            volatility_multiplier=volatility_multiplier
         )
         
         return klines
