@@ -56,7 +56,7 @@ def prepare_volatility_targets(df: pd.DataFrame, pred_steps: int = 15, lookback:
     return np.array(volatilities)
 
 def train_volatility_model(
-    config_path: str = 'config.yaml',
+    config_path: str = None,
     data_path: str = None,
     epochs: int = 100,
     batch_size: int = 32,
@@ -66,15 +66,25 @@ def train_volatility_model(
     Train volatility magnitude prediction model.
     
     Args:
-        config_path: Path to config file
+        config_path: Path to config file (defaults to parent directory)
         data_path: Path to training data CSV
         epochs: Number of training epochs
         batch_size: Batch size for training
         learning_rate: Learning rate
     """
     
+    # Handle config path
+    if config_path is None:
+        # Try to find config.yaml in parent directory
+        parent_dir = Path(__file__).parent.parent
+        config_path = parent_dir / 'config.yaml'
+        if not config_path.exists():
+            config_path = 'config.yaml'
+    
+    logger.info(f"Loading config from: {config_path}")
+    
     # Load configuration
-    config = load_config(config_path)
+    config = load_config(str(config_path))
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logger.info(f"Using device: {device}")
     
@@ -232,7 +242,7 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Train volatility prediction model")
-    parser.add_argument('--config', type=str, default='config.yaml', help='Config file path')
+    parser.add_argument('--config', type=str, default=None, help='Config file path (defaults to ../config.yaml)')
     parser.add_argument('--data', type=str, default=None, help='Training data path')
     parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
     parser.add_argument('--batch-size', type=int, default=32, help='Batch size')
