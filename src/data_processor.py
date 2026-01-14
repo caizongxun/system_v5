@@ -13,7 +13,8 @@ class DataProcessor:
     
     def add_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Add technical indicators to dataframe
+        Add technical indicators to dataframe.
+        Focus on relative changes instead of absolute prices.
         
         Args:
             df: DataFrame with OHLCV data
@@ -23,11 +24,22 @@ class DataProcessor:
         """
         df = df.copy()
         
+        # Price changes (relative, not absolute)
         df['returns'] = df['close'].pct_change()
+        df['high_low_ratio'] = (df['high'] - df['low']) / df['close']
+        df['open_close_ratio'] = (df['close'] - df['open']) / df['open']
         
+        # Moving averages (normalized)
         df['SMA_10'] = df['close'].rolling(window=10).mean()
         df['SMA_20'] = df['close'].rolling(window=20).mean()
         df['SMA_50'] = df['close'].rolling(window=50).mean()
+        
+        # Price relative to moving averages
+        df['price_to_sma_10'] = (df['close'] - df['SMA_10']) / df['SMA_10']
+        df['price_to_sma_20'] = (df['close'] - df['SMA_20']) / df['SMA_20']
+        
+        # Volatility (relative)
+        df['volatility_20'] = df['returns'].rolling(window=20).std()
         
         df['RSI'] = self._calculate_rsi(df['close'], period=14)
         
@@ -40,6 +52,7 @@ class DataProcessor:
         df['BB_Upper'] = bb_result['Upper']
         df['BB_Middle'] = bb_result['Middle']
         df['BB_Lower'] = bb_result['Lower']
+        df['BB_Position'] = (df['close'] - bb_result['Lower']) / (bb_result['Upper'] - bb_result['Lower'])
         
         df['Volume_SMA'] = df['volume'].rolling(window=20).mean()
         df['Volume_Ratio'] = df['volume'] / df['Volume_SMA']
