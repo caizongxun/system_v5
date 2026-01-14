@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from sklearn.metrics import mean_squared_error, mean_absolute_error, mean_absolute_percentage_error
+from sklearn.metrics import mean_squared_error, mean_absolute_error
 import matplotlib.pyplot as plt
 import logging
 from pathlib import Path
@@ -13,6 +13,26 @@ class Evaluator:
         self.results_dir = Path(results_dir)
         self.results_dir.mkdir(parents=True, exist_ok=True)
         self.metrics = {}
+    
+    def _calculate_mape(self, y_true: np.ndarray, y_pred: np.ndarray, epsilon: float = 1e-10) -> float:
+        """
+        Calculate MAPE with epsilon to avoid division by zero
+        
+        Args:
+            y_true: True values
+            y_pred: Predicted values
+            epsilon: Small value to prevent division by zero
+            
+        Returns:
+            MAPE value
+        """
+        y_true_flat = np.abs(y_true.reshape(-1))
+        y_pred_flat = y_pred.reshape(-1)
+        
+        denominator = np.maximum(y_true_flat, epsilon)
+        mape = np.mean(np.abs((y_true_flat - y_pred_flat) / denominator)) * 100
+        
+        return mape
     
     def calculate_metrics(self, y_true: np.ndarray, y_pred: np.ndarray) -> Dict:
         """
@@ -31,16 +51,20 @@ class Evaluator:
         mse = mean_squared_error(y_true_flat, y_pred_flat)
         rmse = np.sqrt(mse)
         mae = mean_absolute_error(y_true_flat, y_pred_flat)
-        mape = mean_absolute_percentage_error(y_true_flat, y_pred_flat)
+        mape = self._calculate_mape(y_true_flat, y_pred_flat)
+        
+        r_squared = 1 - (np.sum((y_true_flat - y_pred_flat) ** 2) / 
+                        np.sum((y_true_flat - np.mean(y_true_flat)) ** 2))
         
         self.metrics = {
             'MSE': mse,
             'RMSE': rmse,
             'MAE': mae,
-            'MAPE': mape
+            'MAPE': mape,
+            'R_Squared': r_squared
         }
         
-        logger.info(f"Metrics calculated - RMSE: {rmse:.6f}, MAE: {mae:.6f}, MAPE: {mape:.6f}")
+        logger.info(f"Metrics - RMSE: {rmse:.6f}, MAE: {mae:.6f}, MAPE: {mape:.2f}%, R2: {r_squared:.4f}")
         return self.metrics
     
     def plot_predictions(self, y_true: np.ndarray, y_pred: np.ndarray, 
@@ -108,11 +132,12 @@ class Evaluator:
         
         axes[0].plot(history.history['loss'], label='Train Loss')
         axes[0].plot(history.history['val_loss'], label='Val Loss')
-        axes[0].set_title('Loss')
+        axes[0].set_title('Loss (MSE)')
         axes[0].set_xlabel('Epoch')
         axes[0].set_ylabel('Loss')
         axes[0].legend()
         axes[0].grid(True)
+        axes[0].set_yscale('log')
         
         axes[1].plot(history.history['mae'], label='Train MAE')
         axes[1].plot(history.history['val_mae'], label='Val MAE')
@@ -148,8 +173,15 @@ class Evaluator:
         with open(save_path, 'w') as f:
             f.write("Model Evaluation Metrics\n")
             f.write("=" * 40 + "\n\n")
-            for metric_name, metric_value in self.metrics.items():
-                f.write(f"{metric_name}: {metric_value:.6f}\n")
+            f.write("Primary Metrics (MSE-based):\n")
+            f.write(f"  MSE:  {self.metrics['MSE']:.8f}\n")
+            f.write(f"  RMSE: {self.metrics['RMSE']:.8f}\n")
+            f.write(f"  MAE:  {self.metrics['MAE']:.8f}\n")
+            f.write(f"  R2:   {self.metrics['R_Squared']:.6f}\n")
+            f.write(f"\nAdditional Metric:\n")
+            f.write(f"  MAPE: {self.metrics['MAPE']:.2f}%\n")
+            f.write(f"\nNote: MAPE is for reference only.\n")
+            f.write(f"Focus on RMSE/MAE for model evaluation.\n")
         
         logger.info(f"Metrics report saved to {save_path}")
     
@@ -161,9 +193,14 @@ class Evaluator:
             logger.warning("No metrics available")
             return
         
-        print("\n" + "=" * 50)
+        print("\n" + "=" * 60)
         print("Model Evaluation Metrics Summary")
-        print("=" * 50)
-        for metric_name, metric_value in self.metrics.items():
-            print(f"{metric_name:15} : {metric_value:12.6f}")
-        print("=" * 50 + "\n")
+        print("=" * 60)
+        print(f"{'MSE':<20} : {self.metrics['MSE']:>12.8f}")
+        print(f"{'RMSE':<20} : {self.metrics['RMSE']:>12.8f}")
+        print(f"{'MAE':<20} : {self.metrics['MAE']:>12.8f}")
+        print(f"{'R-Squared':<20} : {self.metrics['R_Squared']:>12.6f}")
+        print(f"{'MAPE (reference)':<20} : {self.metrics['MAPE']:>12.2f}%")
+        print("\nNote: Use RMSE/MAE for model evaluation.")
+        print("MAPE can be inflated due to small normalized values.")
+        print("=" * 60 + "\n")
