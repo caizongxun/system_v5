@@ -49,14 +49,38 @@ class DataProcessor:
         # RSI
         df['RSI'] = ta.momentum.rsi(df['close'], window=14) / 100  # Normalize to [0,1]
         
-        # MACD
-        macd_result = ta.trend.macd(df['close'])
-        df['MACD'] = macd_result.iloc[:, 0] / df['close']  # Normalize
-        df['MACD_Signal'] = macd_result.iloc[:, 1] / df['close']
+        # MACD - Handle different return formats
+        try:
+            macd_result = ta.trend.macd(df['close'])
+            # Check if result is DataFrame or Series
+            if isinstance(macd_result, pd.DataFrame):
+                # macd_result has columns: macd, macd_signal, macd_diff
+                df['MACD'] = macd_result.iloc[:, 0] / df['close']
+                df['MACD_Signal'] = macd_result.iloc[:, 1] / df['close']
+            else:
+                # Single series returned, create MACD_Signal from macd_signal function
+                df['MACD'] = macd_result / df['close']
+                macd_signal = ta.trend.macd_signal(df['close'])
+                if isinstance(macd_signal, pd.Series):
+                    df['MACD_Signal'] = macd_signal / df['close']
+                else:
+                    df['MACD_Signal'] = 0.0
+        except Exception as e:
+            logger.warning(f"Error calculating MACD: {e}. Setting to 0.")
+            df['MACD'] = 0.0
+            df['MACD_Signal'] = 0.0
         
         # Bollinger Bands
-        bb = ta.volatility.bollinger_channel(df['close'], window=20, scalar=2)
-        df['BB_Position'] = (df['close'] - bb.iloc[:, 0]) / (bb.iloc[:, 2] - bb.iloc[:, 0])
+        try:
+            bb = ta.volatility.bollinger_channel(df['close'], window=20, scalar=2)
+            if isinstance(bb, pd.DataFrame):
+                df['BB_Position'] = (df['close'] - bb.iloc[:, 0]) / (bb.iloc[:, 2] - bb.iloc[:, 0])
+            else:
+                df['BB_Position'] = 0.5
+        except Exception as e:
+            logger.warning(f"Error calculating Bollinger Bands: {e}. Setting to 0.5.")
+            df['BB_Position'] = 0.5
+        
         df['BB_Position'] = df['BB_Position'].fillna(0.5)  # Fill NaN with middle
         
         # Volume
@@ -88,6 +112,12 @@ class DataProcessor:
         Returns:
             (normalized_data: np.ndarray, scaler: StandardScaler)
         """
+        # Check if all feature columns exist
+        missing_cols = [col for col in feature_columns if col not in df.columns]
+        if missing_cols:
+            logger.warning(f"Missing columns: {missing_cols}. Using available columns.")
+            feature_columns = [col for col in feature_columns if col in df.columns]
+        
         data = df[feature_columns].values
         
         # Use StandardScaler instead of MinMaxScaler
@@ -97,8 +127,11 @@ class DataProcessor:
         
         logger.info(f"Normalized {len(feature_columns)} features")
         logger.info(f"Scaler type: StandardScaler (Z-score)")
-        logger.info(f"Returns mean: {normalized_data[:, feature_columns.index('returns')].mean():.6f}")
-        logger.info(f"Returns std: {normalized_data[:, feature_columns.index('returns')].std():.6f}")
+        
+        if 'returns' in feature_columns:
+            returns_idx = feature_columns.index('returns')
+            logger.info(f"Returns mean: {normalized_data[:, returns_idx].mean():.6f}")
+            logger.info(f"Returns std: {normalized_data[:, returns_idx].std():.6f}")
         
         return normalized_data, scaler
     
