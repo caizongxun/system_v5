@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import torch
 import logging
 import pickle
+import time
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -65,8 +66,8 @@ def load_model_and_config():
     
     return model, config, feature_columns, device, scaler
 
-@st.cache_resource
-def load_data():
+def load_data_realtime():
+    """Load real-time market data from HuggingFace"""
     loader = DataLoader(
         repo_id="zongowo111/v2-crypto-ohlcv-data",
         cache_dir=Path("test/data")
@@ -92,7 +93,28 @@ def preprocess_data(df, processor, feature_columns, scaler=None):
     
     return normalized_data, scaler, df_processed
 
-def plot_klines(df_historical, predicted_klines):
+def get_current_time_and_next_prediction_time():
+    """獲取當前時間和下一根K棒預測開始時間"""
+    now = datetime.now()
+    minutes = now.minute
+    
+    # 15分鐘K棒的邊界: 00, 15, 30, 45
+    boundaries = [0, 15, 30, 45]
+    current_boundary = (minutes // 15) * 15
+    
+    # 已形成的K棒開始時間
+    formed_candle_time = now.replace(minute=current_boundary, second=0, microsecond=0)
+    
+    # 下一根K棒預測開始時間
+    if current_boundary == 45:
+        next_prediction_time = formed_candle_time.replace(minute=0) + timedelta(hours=1)
+    else:
+        next_prediction_time = formed_candle_time + timedelta(minutes=15)
+    
+    return formed_candle_time, next_prediction_time
+
+def plot_klines(df_historical, predicted_klines, current_time_info):
+    """繪製K棒圖表,包括實時數據和預測"""
     df_plot = df_historical.tail(100).copy()
     
     if isinstance(df_plot['open_time'].iloc[0], str):
@@ -103,9 +125,10 @@ def plot_klines(df_historical, predicted_klines):
         shared_xaxes=True,
         vertical_spacing=0.1,
         row_heights=[0.7, 0.3],
-        subplot_titles=("BTC 15m K-Line with Predictions (Fixed Baseline)", "Volume")
+        subplot_titles=("BTC 15m K-Line with Real-Time Predictions", "Volume")
     )
     
+    # 歷史K棒
     fig.add_trace(
         go.Candlestick(
             x=df_plot['open_time'],
@@ -119,6 +142,7 @@ def plot_klines(df_historical, predicted_klines):
         row=1, col=1
     )
     
+    # 預測K棒
     if predicted_klines:
         pred_times = [k['time'] for k in predicted_klines]
         pred_opens = [k['open'] for k in predicted_klines]
@@ -133,12 +157,15 @@ def plot_klines(df_historical, predicted_klines):
                 high=pred_highs,
                 low=pred_lows,
                 close=pred_closes,
-                name='Predicted (Fixed Baseline)',
-                visible=True
+                name='Predicted (Next 15 Bars)',
+                visible=True,
+                increasing=dict(line=dict(color='lime')),
+                decreasing=dict(line=dict(color='red'))
             ),
             row=1, col=1
         )
     
+    # 歷史成交量
     fig.add_trace(
         go.Bar(
             x=df_plot['open_time'],
@@ -150,6 +177,7 @@ def plot_klines(df_historical, predicted_klines):
         row=2, col=1
     )
     
+    # 預測成交量
     if predicted_klines:
         pred_volumes = [k['volume'] for k in predicted_klines]
         fig.add_trace(
@@ -164,7 +192,7 @@ def plot_klines(df_historical, predicted_klines):
         )
     
     fig.update_layout(
-        title="BTC/USDT 15M with Price Predictions (Fixed Baseline)",
+        title="BTC/USDT 15M with Real-Time Price Predictions",
         yaxis_title='Price (USDT)',
         xaxis_rangeslider_visible=False,
         height=700,
@@ -201,11 +229,21 @@ def main():
         initial_sidebar_state="expanded"
     )
     
-    st.title("BTC 15M Price Prediction Model (Fixed Baseline)")
+    st.title("BTC 15M Price Prediction Model (Real-Time)")
     st.markdown("---")
     
     with st.sidebar:
         st.header("Settings")
+        
+        # 自動刷新設置
+        refresh_interval = st.slider(
+            "Auto-Refresh Interval (seconds)",
+            min_value=30,
+            max_value=300,
+            value=60,
+            step=30,
+            help="How often to fetch new market data and update predictions"
+        )
         
         volatility_multiplier = st.slider(
             "Volatility Multiplier",
@@ -213,229 +251,216 @@ def main():
             max_value=5.0,
             value=2.0,
             step=0.5,
-            help="Controls how much visible volatility appears in predictions. Higher values show more price fluctuation."
+            help="Controls how much visible volatility appears in predictions."
         )
         
         show_table = st.checkbox("Show Prediction Table", value=True)
         show_analysis = st.checkbox("Show Volatility Analysis", value=True)
         show_metrics = st.checkbox("Show Model Metrics", value=True)
+        show_time_info = st.checkbox("Show Time Information", value=True)
         
         st.markdown("---")
         st.info("""
-        Fixed Baseline Mode:
-        Predictions are based on a fixed
-        historical window (last 100 bars).
-        This ensures consistent predictions
-        regardless of current price changes.
+        Real-Time Mode:
+        Predictions are updated based on the
+        latest closed 15-minute K-bar.
+        New predictions are generated as soon as
+        a new K-bar is fully formed.
         """)
     
-    st.info("Loading model and data...")
+    st.info("Loading model and real-time data...")
     
     try:
         model, config, feature_columns, device, scaler = load_model_and_config()
-        df = load_data()
         processor = DataProcessor()
         
-        st.success("Model and data loaded successfully!")
+        st.success("Model loaded successfully!")
         
-        normalized_data, scaler, df_processed = preprocess_data(df, processor, feature_columns, scaler)
+        # 創建placeholders用於實時更新
+        time_info_placeholder = st.empty()
+        chart_placeholder = st.empty()
+        metrics_row1 = st.empty()
+        metrics_row2 = st.empty()
+        volatility_placeholder = st.empty()
+        table_placeholder = st.empty()
+        model_info_placeholder = st.empty()
+        update_time_placeholder = st.empty()
         
-        predictor = RollingPredictor(model, scaler, feature_columns, device)
-        
-        st.info("Generating predictions...")
-        X_baseline = normalized_data[-100:]
-        predicted_klines = predictor.predict_with_fixed_baseline(
-            X_baseline, df, pred_steps=config['model']['prediction_length'], volatility_multiplier=volatility_multiplier
-        )
-        st.success("Predictions generated!")
-        
-        st.subheader("Price Chart with Predictions")
-        fig = plot_klines(df, predicted_klines)
-        st.plotly_chart(fig, use_container_width=True)
-        
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            st.metric(
-                "Current Price",
-                f"${df.iloc[-1]['close']:.2f}",
-                f"{((df.iloc[-1]['close'] - df.iloc[-2]['close']) / df.iloc[-2]['close'] * 100):.2f}%"
-            )
-        
-        with col2:
-            avg_pred = np.mean([k['close'] for k in predicted_klines])
-            change = ((avg_pred - df.iloc[-1]['close']) / df.iloc[-1]['close'] * 100)
-            st.metric(
-                "Avg Predicted Price (15 bars)",
-                f"${avg_pred:.2f}",
-                f"{change:.2f}%"
-            )
-        
-        with col3:
-            high_pred = max([k['high'] for k in predicted_klines])
-            st.metric(
-                "Predicted High",
-                f"${high_pred:.2f}"
-            )
-        
-        with col4:
-            low_pred = min([k['low'] for k in predicted_klines])
-            st.metric(
-                "Predicted Low",
-                f"${low_pred:.2f}"
-            )
-        
-        st.markdown("---")
-        
-        if show_analysis:
-            st.subheader("Volatility Analysis")
+        # 實時數據更新循環
+        last_update = 0
+        while True:
+            current_time = time.time()
             
-            col1, col2, col3 = st.columns(3)
+            # 檢查是否應該更新
+            if current_time - last_update >= refresh_interval:
+                with st.spinner("Fetching real-time market data..."):
+                    # 加載實時數據
+                    df = load_data_realtime()
+                    normalized_data, scaler, df_processed = preprocess_data(df, processor, feature_columns, scaler)
+                    
+                    # 獲取時間信息
+                    formed_candle_time, next_pred_time = get_current_time_and_next_prediction_time()
+                    
+                    # 使用最後100根K棒進行預測
+                    predictor = RollingPredictor(model, scaler, feature_columns, device)
+                    X_baseline = normalized_data[-100:]
+                    predicted_klines = predictor.predict_with_fixed_baseline(
+                        X_baseline, df, pred_steps=config['model']['prediction_length'],
+                        volatility_multiplier=volatility_multiplier
+                    )
+                    
+                    last_update = current_time
+                
+                # 更新時間信息
+                if show_time_info:
+                    with time_info_placeholder.container():
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Current Time", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                        with col2:
+                            st.metric("Last Closed Candle", formed_candle_time.strftime('%Y-%m-%d %H:%M'))
+                        with col3:
+                            st.metric("Next Prediction Start", next_pred_time.strftime('%Y-%m-%d %H:%M'))
+                        st.markdown("---")
+                
+                # 更新圖表
+                with chart_placeholder.container():
+                    st.subheader("Price Chart with Real-Time Predictions")
+                    current_time_info = {
+                        'formed_candle': formed_candle_time,
+                        'next_pred_time': next_pred_time
+                    }
+                    fig = plot_klines(df, predicted_klines, current_time_info)
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                # 更新指標
+                with metrics_row1.container():
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    with col1:
+                        st.metric(
+                            "Current Price",
+                            f"${df.iloc[-1]['close']:.2f}",
+                            f"{((df.iloc[-1]['close'] - df.iloc[-2]['close']) / df.iloc[-2]['close'] * 100):.3f}%"
+                        )
+                    
+                    with col2:
+                        avg_pred = np.mean([k['close'] for k in predicted_klines])
+                        change = ((avg_pred - df.iloc[-1]['close']) / df.iloc[-1]['close'] * 100)
+                        st.metric(
+                            "Avg Predicted Price",
+                            f"${avg_pred:.2f}",
+                            f"{change:.3f}%"
+                        )
+                    
+                    with col3:
+                        high_pred = max([k['high'] for k in predicted_klines])
+                        st.metric(
+                            "Predicted High",
+                            f"${high_pred:.2f}"
+                        )
+                    
+                    with col4:
+                        low_pred = min([k['low'] for k in predicted_klines])
+                        st.metric(
+                            "Predicted Low",
+                            f"${low_pred:.2f}"
+                        )
+                
+                # 波動性分析
+                if show_analysis:
+                    with volatility_placeholder.container():
+                        st.markdown("---")
+                        st.subheader("Volatility Analysis")
+                        
+                        col1, col2, col3 = st.columns(3)
+                        
+                        current_vol = df['close'].pct_change().tail(20).std() * 100
+                        
+                        pred_returns = []
+                        for k in predicted_klines:
+                            ret = (k['close'] - k['open']) / k['open']
+                            pred_returns.append(ret)
+                        pred_vol = np.std(pred_returns) * 100 if pred_returns else 0
+                        
+                        pred_range = max([k['high'] for k in predicted_klines]) - min([k['low'] for k in predicted_klines])
+                        
+                        with col1:
+                            st.metric(
+                                "Current Volatility (20-bar)",
+                                f"{current_vol:.3f}%"
+                            )
+                        
+                        with col2:
+                            st.metric(
+                                "Predicted Volatility (15-bar)",
+                                f"{pred_vol:.3f}%",
+                                f"{pred_vol - current_vol:.3f}%"
+                            )
+                        
+                        with col3:
+                            st.metric(
+                                "Predicted Price Range",
+                                f"${pred_range:.2f}"
+                            )
+                
+                # 預測表格
+                if show_table:
+                    with table_placeholder.container():
+                        st.markdown("---")
+                        st.subheader("Detailed Predictions")
+                        pred_df = display_prediction_table(predicted_klines)
+                        st.dataframe(pred_df, width='stretch')
+                
+                # 模型信息
+                if show_metrics:
+                    with model_info_placeholder.container():
+                        st.markdown("---")
+                        st.subheader("Model Performance Metrics")
+                        
+                        col1, col2, col3, col4 = st.columns(4)
+                        
+                        with col1:
+                            st.metric("Model Type", "LSTM")
+                        
+                        with col2:
+                            st.metric("LSTM Units", str(config['model']['lstm_units']))
+                        
+                        with col3:
+                            st.metric("Features", len(feature_columns))
+                        
+                        with col4:
+                            st.metric("Sequence Length", config['model']['sequence_length'])
+                        
+                        col1, col2, col3 = st.columns(3)
+                        
+                        with col1:
+                            st.metric("R2_Score (Test)", "0.2447")
+                        
+                        with col2:
+                            st.metric("RMSE", "0.5811")
+                        
+                        with col3:
+                            st.metric("MAE", "0.3210")
+                
+                # 更新時間戳
+                with update_time_placeholder.container():
+                    st.markdown("---")
+                    st.markdown(
+                        f"Last update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | "
+                        f"Next update in: {refresh_interval}s"
+                    )
             
-            current_vol = df['close'].pct_change().tail(20).std() * 100
-            
-            pred_returns = []
-            for k in predicted_klines:
-                ret = (k['close'] - k['open']) / k['open']
-                pred_returns.append(ret)
-            pred_vol = np.std(pred_returns) * 100 if pred_returns else 0
-            
-            pred_range = max([k['high'] for k in predicted_klines]) - min([k['low'] for k in predicted_klines])
-            
-            with col1:
-                st.metric(
-                    "Current Volatility (20-bar)",
-                    f"{current_vol:.3f}%"
-                )
-            
-            with col2:
-                st.metric(
-                    "Predicted Volatility (15-bar)",
-                    f"{pred_vol:.3f}%",
-                    f"{pred_vol - current_vol:.3f}%"
-                )
-            
-            with col3:
-                st.metric(
-                    "Predicted Price Range",
-                    f"${pred_range:.2f}"
-                )
-        
-        if show_table:
-            st.markdown("---")
-            st.subheader("Detailed Predictions")
-            pred_df = display_prediction_table(predicted_klines)
-            st.dataframe(pred_df, width='stretch')
-        
-        if show_metrics:
-            st.markdown("---")
-            st.subheader("Model Performance Metrics")
-            
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                st.metric("Model Type", "LSTM")
-            
-            with col2:
-                st.metric("LSTM Units", str(config['model']['lstm_units']))
-            
-            with col3:
-                st.metric("Features", len(feature_columns))
-            
-            with col4:
-                st.metric("Sequence Length", config['model']['sequence_length'])
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.metric("R2_Score (Test)", "0.2447")
-            
-            with col2:
-                st.metric("RMSE", "0.5811")
-            
-            with col3:
-                st.metric("MAE", "0.3210")
-        
-        st.markdown("---")
-        st.subheader("Model Information")
-        
-        with st.expander("Model Architecture"):
-            st.write("""
-            - Architecture: 2-Layer LSTM with Huber Loss
-            - Hidden Units: [256, 128]
-            - Input Shape: (100 time steps, 16 features)
-            - Output Shape: (15 time steps, 16 features)
-            - Loss Function: Huber (delta=0.5)
-            - Normalization: StandardScaler (Z-score)
-            - Prediction Mode: Fixed baseline (last 100 bars remain constant)
-            - Device: GPU (CUDA) if available
-            """)
-        
-        with st.expander("Feature Engineering"):
-            st.write(f"""
-            Total features: {len(feature_columns)}
-            
-            Price Features:
-            - returns: Price percentage change
-            - high_low_ratio: Intra-bar price range
-            - open_close_ratio: Opening relative change
-            
-            Trend Features:
-            - price_to_sma_10: Price vs 10-bar MA
-            - price_to_sma_20: Price vs 20-bar MA
-            - momentum_5: 5-bar rate of change
-            - momentum_10: 10-bar rate of change
-            
-            Volatility Features:
-            - volatility_20: 20-bar rolling std dev
-            - volatility_5: 5-bar rolling std dev
-            - ATR: Average True Range
-            - returns_std_5: 5-bar returns volatility
-            
-            Technical Indicators:
-            - RSI: Relative Strength Index (14)
-            - MACD: Moving Average Convergence Divergence
-            - BB_Position: Bollinger Bands position
-            - Volume_Ratio: Volume vs 20-bar MA
-            """)
-        
-        with st.expander("Volatility Multiplier"):
-            st.write(f"""
-            Current multiplier: {volatility_multiplier}
-            
-            The volatility multiplier enhances the visible price fluctuations in predictions:
-            - Lower values (0.5-1.0): Smoother predictions, less visible movement
-            - Default value (2.0): Balanced representation of model predictions
-            - Higher values (3.0-5.0): More pronounced price swings, easier to visualize
-            
-            The actual model predictions remain unchanged regardless of this setting.
-            This multiplier only affects visualization for clarity.
-            """)
-        
-        with st.expander("Disclaimer"):
-            st.warning("""
-            Important Disclaimer:
-            - This model is for educational and research purposes only
-            - Do NOT use for actual trading without proper risk management
-            - Past performance does NOT guarantee future results
-            - Cryptocurrency markets are highly volatile and unpredictable
-            - Always conduct your own research before investment decisions
-            - Consider consulting with a financial advisor
-            """)
-        
-        st.markdown("---")
-        st.markdown(
-            f"Last update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        )
+            # 暫停以避免過度消耗資源
+            time.sleep(1)
         
     except Exception as e:
         st.error(f"Error: {str(e)}")
-        st.write("Please make sure:")
-        st.write("1. Model file exists at: test/models/btc_15m_model_pytorch.pt")
-        st.write("2. Scaler file exists at: test/models/btc_15m_scaler.pkl")
-        st.write("3. Config file exists at: config/config.yaml")
-        st.write("4. Model was trained with the new features")
-        st.write("5. All dependencies are installed")
+        st.write("Troubleshooting:")
+        st.write("1. Model file: test/models/btc_15m_model_pytorch.pt")
+        st.write("2. Scaler file: test/models/btc_15m_scaler.pkl")
+        st.write("3. Config file: config/config.yaml")
+        st.write("4. All dependencies installed")
         logger.exception("App error:")
 
 if __name__ == "__main__":
