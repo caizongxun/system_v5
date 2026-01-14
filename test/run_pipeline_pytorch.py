@@ -5,6 +5,7 @@ from sklearn.model_selection import train_test_split
 import logging
 import torch
 from torch.utils.data import TensorDataset, DataLoader as TorchDataLoader
+import gc
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -181,25 +182,62 @@ def step_6_train_model(model, X_train, y_train, X_val, y_val, config, device):
     
     return model
 
+def predict_in_batches(model, X, batch_size=256, device='cuda'):
+    """
+    Make predictions in batches to avoid memory issues
+    
+    Args:
+        model: Trained model
+        X: Input data as numpy array
+        batch_size: Batch size for prediction
+        device: Device to use
+        
+    Returns:
+        Predictions as numpy array
+    """
+    predictions = []
+    
+    # Convert to tensor
+    X_tensor = torch.tensor(X, dtype=torch.float32)
+    
+    # Process in batches
+    for i in range(0, len(X_tensor), batch_size):
+        batch = X_tensor[i:i+batch_size].to(device)
+        
+        with torch.no_grad():
+            batch_pred = model(batch)
+        
+        predictions.append(batch_pred.cpu().numpy())
+        
+        # Free memory
+        del batch
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    
+    return np.concatenate(predictions, axis=0)
+
 def step_7_evaluate_model(model, X_train, y_train, X_val, y_val, X_test, y_test, config, device):
     """
-    Step 7: Evaluate model on all sets
+    Step 7: Evaluate model on all sets (with batch processing to save memory)
     """
     print_section("STEP 7: Evaluating Model")
     
     evaluator = Evaluator(results_dir=config['paths']['results_dir'])
     
-    # Convert to tensors and make predictions
-    X_train_tensor = torch.tensor(X_train, dtype=torch.float32).to(device)
-    X_val_tensor = torch.tensor(X_val, dtype=torch.float32).to(device)
-    X_test_tensor = torch.tensor(X_test, dtype=torch.float32).to(device)
+    batch_size = config['model']['batch_size']
     
-    y_train_pred = model.predict(X_train_tensor)
-    y_val_pred = model.predict(X_val_tensor)
-    y_test_pred = model.predict(X_test_tensor)
+    logger.info("Making predictions on training set...")
+    y_train_pred = predict_in_batches(model, X_train, batch_size=batch_size, device=device)
+    
+    logger.info("Making predictions on validation set...")
+    y_val_pred = predict_in_batches(model, X_val, batch_size=batch_size, device=device)
+    
+    logger.info("Making predictions on test set...")
+    y_test_pred = predict_in_batches(model, X_test, batch_size=batch_size, device=device)
     
     logger.info("--- Training Set Metrics ---")
-    train_metrics = evaluator.calculate_metrics(y_train, y_train_pred)
+    evaluator.calculate_metrics(y_train, y_train_pred)
     
     logger.info("--- Validation Set Metrics ---")
     evaluator.calculate_metrics(y_val, y_val_pred)
@@ -216,6 +254,12 @@ def step_7_evaluate_model(model, X_train, y_train, X_val, y_val, X_test, y_test,
     evaluator.plot_predictions(y_test, y_test_pred, sample_idx=0)
     
     logger.info("Model evaluation completed")
+    
+    # Clean up memory
+    del y_train_pred, y_val_pred, y_test_pred
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     
     return evaluator
 
