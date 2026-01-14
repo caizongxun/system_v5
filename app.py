@@ -12,6 +12,7 @@ from src.utils import load_config
 from src.data_loader import DataLoader
 from src.data_processor import DataProcessor
 from src.model_pytorch import LSTMModel
+from src.predictor import RollingPredictor
 
 import streamlit as st
 import plotly.graph_objects as go
@@ -28,7 +29,9 @@ def load_model_and_config():
     feature_columns = config['features'].get('selected_features', [
         'returns', 'high_low_ratio', 'open_close_ratio',
         'price_to_sma_10', 'price_to_sma_20', 'volatility_20',
-        'RSI', 'MACD', 'MACD_Signal', 'BB_Position', 'Volume_Ratio'
+        'volatility_5', 'momentum_5', 'momentum_10', 'ATR',
+        'RSI', 'MACD', 'MACD_Signal', 'BB_Position',
+        'Volume_Ratio', 'returns_std_5'
     ])
     
     model = LSTMModel(
@@ -46,6 +49,8 @@ def load_model_and_config():
     if model_path.exists():
         model.load(str(model_path))
         model.eval()
+    else:
+        st.error("Model file not found! Please train the model first.")
     
     return model, config, feature_columns, device
 
@@ -72,62 +77,11 @@ def preprocess_data(df, processor, feature_columns):
     normalized_data, scaler = processor.normalize_features(df_processed, feature_columns)
     return normalized_data, scaler, df_processed
 
-def predict_next_klines(model, X_latest, scaler, df, feature_columns, device):
-    X_tensor = torch.tensor(X_latest.reshape(1, -1, len(feature_columns)), dtype=torch.float32)
-    X_tensor = X_tensor.to(device)
-    
-    with torch.no_grad():
-        prediction = model(X_tensor)
-    
-    prediction_np = prediction.cpu().numpy()[0]
-    prediction_denorm = scaler.inverse_transform(prediction_np)
-    
-    last_close = df.iloc[-1]['close']
-    
-    klines = []
-    current_time = df.iloc[-1]['open_time'] + timedelta(minutes=15)
-    current_close = last_close
-    
-    for i in range(len(prediction_denorm)):
-        pred_features = prediction_denorm[i]
-        
-        returns_idx = feature_columns.index('returns')
-        high_low_ratio_idx = feature_columns.index('high_low_ratio')
-        open_close_ratio_idx = feature_columns.index('open_close_ratio')
-        
-        returns = pred_features[returns_idx]
-        high_low_ratio = pred_features[high_low_ratio_idx]
-        open_close_ratio = pred_features[open_close_ratio_idx]
-        
-        open_price = current_close
-        close_price = open_price * (1 + returns)
-        
-        price_range = close_price * high_low_ratio
-        high_price = max(open_price, close_price) + price_range / 2
-        low_price = min(open_price, close_price) - price_range / 2
-        
-        volume = df.iloc[-1]['volume'] * 0.8
-        
-        klines.append({
-            'time': current_time,
-            'open': open_price,
-            'high': high_price,
-            'low': low_price,
-            'close': close_price,
-            'volume': volume,
-            'type': 'predicted'
-        })
-        
-        current_time += timedelta(minutes=15)
-        current_close = close_price
-    
-    return klines
-
 def plot_klines(df_historical, predicted_klines):
-    # 取最近 100 根 K 棒作為背景
+    # Take last 100 K-bars as background
     df_plot = df_historical.tail(100).copy()
     
-    # 轉換時間格式
+    # Convert time format
     if isinstance(df_plot['open_time'].iloc[0], str):
         df_plot['open_time'] = pd.to_datetime(df_plot['open_time'])
     
@@ -136,10 +90,10 @@ def plot_klines(df_historical, predicted_klines):
         shared_xaxes=True,
         vertical_spacing=0.1,
         row_heights=[0.7, 0.3],
-        subplot_titles=("BTC 15m K-Line with Predictions", "Volume")
+        subplot_titles=("BTC 15m K-Line with Predictions (Fixed Baseline)", "Volume")
     )
     
-    # 繪製歷史 K 棒
+    # Plot historical K-bars
     fig.add_trace(
         go.Candlestick(
             x=df_plot['open_time'],
@@ -153,7 +107,7 @@ def plot_klines(df_historical, predicted_klines):
         row=1, col=1
     )
     
-    # 繪製預測 K 棒
+    # Plot predicted K-bars
     if predicted_klines:
         pred_times = [k['time'] for k in predicted_klines]
         pred_opens = [k['open'] for k in predicted_klines]
@@ -168,13 +122,13 @@ def plot_klines(df_historical, predicted_klines):
                 high=pred_highs,
                 low=pred_lows,
                 close=pred_closes,
-                name='Predicted',
+                name='Predicted (Fixed Baseline)',
                 visible=True
             ),
             row=1, col=1
         )
     
-    # 繪製交易量
+    # Plot volume
     fig.add_trace(
         go.Bar(
             x=df_plot['open_time'],
@@ -199,9 +153,9 @@ def plot_klines(df_historical, predicted_klines):
             row=2, col=1
         )
     
-    # 更新佈局
+    # Update layout
     fig.update_layout(
-        title="BTC/USDT 15M Candlestick Chart with Price Predictions",
+        title="BTC/USDT 15M with Price Predictions (Fixed Baseline)",
         yaxis_title='Price (USDT)',
         xaxis_rangeslider_visible=False,
         height=700,
@@ -224,7 +178,8 @@ def display_prediction_table(predicted_klines):
             'High': f"${k['high']:.2f}",
             'Low': f"${k['low']:.2f}",
             'Close': f"${k['close']:.2f}",
-            'Change': f"{((k['close'] - k['open']) / k['open'] * 100):.2f}%"
+            'Change %': f"{((k['close'] - k['open']) / k['open'] * 100):.3f}%",
+            'Range': f"${k['high'] - k['low']:.2f}"
         })
     
     return pd.DataFrame(data)
@@ -237,25 +192,27 @@ def main():
         initial_sidebar_state="expanded"
     )
     
-    st.title("🤖 BTC 15M Price Prediction Model")
+    st.title("🤖 BTC 15M Price Prediction Model (Fixed Baseline)")
     st.markdown("---")
     
-    # 側邊欄
+    # Sidebar
     with st.sidebar:
         st.header("⚙️ Settings")
         
-        refresh_interval = st.slider(
-            "Refresh Interval (seconds)",
-            min_value=30,
-            max_value=300,
-            value=60,
-            step=30
-        )
-        
         show_table = st.checkbox("Show Prediction Table", value=True)
+        show_analysis = st.checkbox("Show Volatility Analysis", value=True)
         show_metrics = st.checkbox("Show Model Metrics", value=True)
+        
+        st.markdown("---")
+        st.info("""
+        **Fixed Baseline Mode:**
+        Predictions are based on a fixed
+        historical window (last 100 bars).
+        This ensures consistent predictions
+        regardless of current price changes.
+        """)
     
-    # 加載模型和資料
+    # Load model and data
     st.info("⏳ Loading model and data...")
     
     try:
@@ -265,25 +222,24 @@ def main():
         
         st.success("✅ Model and data loaded successfully!")
         
-        # 預處理資料
+        # Preprocess
         normalized_data, scaler, df_processed = preprocess_data(df, processor, feature_columns)
         
-        # 取最後 100 個時間步作為輸入
-        X_latest = normalized_data[-100:]
+        # Create predictor
+        predictor = RollingPredictor(model, scaler, feature_columns, device)
         
-        # 進行預測
+        # Make predictions using fixed baseline (last 100 bars)
         st.info("🔮 Generating predictions...")
-        predicted_klines = predict_next_klines(
-            model, X_latest, scaler, df, feature_columns, device
-        )
+        X_baseline = normalized_data[-100:]
+        predicted_klines = predictor.predict_with_fixed_baseline(X_baseline, df)
         st.success("✅ Predictions generated!")
         
-        # 主要圖表
+        # Display chart
         st.subheader("📊 Price Chart with Predictions")
         fig = plot_klines(df, predicted_klines)
         st.plotly_chart(fig, use_container_width=True)
         
-        # 預測統計
+        # Key metrics
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
@@ -318,16 +274,55 @@ def main():
         
         st.markdown("---")
         
-        # 預測表格
+        # Volatility analysis
+        if show_analysis:
+            st.subheader("📈 Volatility Analysis")
+            
+            col1, col2, col3 = st.columns(3)
+            
+            # Current volatility
+            current_vol = df['close'].pct_change().tail(20).std() * 100
+            
+            # Predicted volatility
+            pred_returns = []
+            for k in predicted_klines:
+                ret = (k['close'] - k['open']) / k['open']
+                pred_returns.append(ret)
+            pred_vol = np.std(pred_returns) * 100
+            
+            # Price range
+            pred_range = max([k['high'] for k in predicted_klines]) - min([k['low'] for k in predicted_klines])
+            
+            with col1:
+                st.metric(
+                    "Current Volatility (20-bar)",
+                    f"{current_vol:.3f}%"
+                )
+            
+            with col2:
+                st.metric(
+                    "Predicted Volatility (15-bar)",
+                    f"{pred_vol:.3f}%",
+                    f"{pred_vol - current_vol:.3f}%"
+                )
+            
+            with col3:
+                st.metric(
+                    "Predicted Price Range",
+                    f"${pred_range:.2f}"
+                )
+        
+        # Prediction table
         if show_table:
+            st.markdown("---")
             st.subheader("📋 Detailed Predictions")
             pred_df = display_prediction_table(predicted_klines)
             st.dataframe(pred_df, use_container_width=True)
         
-        # 模型指標
+        # Model metrics
         if show_metrics:
             st.markdown("---")
-            st.subheader("📈 Model Metrics")
+            st.subheader("📊 Model Performance Metrics")
             
             col1, col2, col3, col4 = st.columns(4)
             
@@ -338,15 +333,15 @@ def main():
                 st.metric("LSTM Units", str(config['model']['lstm_units']))
             
             with col3:
-                st.metric("Sequence Length", config['model']['sequence_length'])
+                st.metric("Features", len(feature_columns))
             
             with col4:
-                st.metric("Prediction Length", config['model']['prediction_length'])
+                st.metric("Sequence Length", config['model']['sequence_length'])
             
             col1, col2, col3 = st.columns(3)
             
             with col1:
-                st.metric("R² Score", "0.8334")
+                st.metric("R² Score (Test)", "0.8334")
             
             with col2:
                 st.metric("RMSE", "0.0887")
@@ -354,45 +349,62 @@ def main():
             with col3:
                 st.metric("MAE", "0.0463")
         
-        # 模型說明
+        # Information sections
         st.markdown("---")
         st.subheader("ℹ️ Model Information")
         
-        with st.expander("Model Architecture"):
+        with st.expander("🏗️ Model Architecture"):
             st.write("""
-            - **Architecture**: Multi-layer LSTM with attention mechanisms
-            - **Features**: 11 relative price features (returns, ratios, indicators)
-            - **Input**: Last 100 15-minute candlesticks
-            - **Output**: Next 15 15-minute candlestick predictions
-            - **Device**: GPU (CUDA)
+            - **Architecture**: Multi-layer LSTM with 3 stacked layers
+            - **Hidden Units**: [256, 128, 64]
+            - **Input Shape**: (100 time steps, 16 features)
+            - **Output Shape**: (15 time steps, 16 features)
+            - **Prediction Mode**: Fixed baseline (last 100 bars remain constant)
+            - **Device**: GPU (CUDA) if available
             """)
         
-        with st.expander("Feature Engineering"):
-            st.write("""
-            - **returns**: Price percentage change
-            - **high_low_ratio**: Daily range ratio
-            - **open_close_ratio**: Opening price relative change
-            - **price_to_sma_10/20**: Price relative to moving average
-            - **volatility_20**: Rolling volatility
-            - **RSI**: Relative Strength Index
-            - **MACD**: MACD indicator
-            - **BB_Position**: Bollinger Bands position
-            - **Volume_Ratio**: Volume relative to moving average
+        with st.expander("📊 Feature Engineering"):
+            st.write(f"""
+            Total features: {len(feature_columns)}
+            
+            **Price Features:**
+            - returns: Price percentage change
+            - high_low_ratio: Intra-bar price range
+            - open_close_ratio: Opening relative change
+            
+            **Trend Features:**
+            - price_to_sma_10: Price vs 10-bar MA
+            - price_to_sma_20: Price vs 20-bar MA
+            - momentum_5: 5-bar rate of change
+            - momentum_10: 10-bar rate of change
+            
+            **Volatility Features:**
+            - volatility_20: 20-bar rolling std dev
+            - volatility_5: 5-bar rolling std dev
+            - ATR: Average True Range
+            - returns_std_5: 5-bar returns volatility
+            
+            **Technical Indicators:**
+            - RSI: Relative Strength Index (14)
+            - MACD: Moving Average Convergence Divergence
+            - BB_Position: Bollinger Bands position
+            - Volume_Ratio: Volume vs 20-bar MA
             """)
         
-        with st.expander("Disclaimer"):
+        with st.expander("⚠️ Disclaimer"):
             st.warning("""
-            ⚠️ **Disclaimer**: This model is for educational and research purposes only.
-            Do not use this model for actual trading without proper risk management.
-            Past performance does not guarantee future results.
-            Always conduct your own research before making investment decisions.
+            **Important Disclaimer:**
+            - This model is for educational and research purposes only
+            - Do NOT use for actual trading without proper risk management
+            - Past performance does NOT guarantee future results
+            - Cryptocurrency markets are highly volatile and unpredictable
+            - Always conduct your own research before investment decisions
+            - Consider consulting with a financial advisor
             """)
         
-        # 自動刷新
-        st.markdown(f"---")
+        st.markdown("---")
         st.markdown(
-            f"⏱️ Auto-refresh interval: {refresh_interval}s | "
-            f"Last update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            f"⏰ Last update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
         
     except Exception as e:
@@ -400,7 +412,9 @@ def main():
         st.write("Please make sure:")
         st.write("1. Model file exists at: test/models/btc_15m_model_pytorch.pt")
         st.write("2. Config file exists at: config/config.yaml")
-        st.write("3. All dependencies are installed")
+        st.write("3. Model was trained with the new features")
+        st.write("4. All dependencies are installed")
+        logger.exception("App error:")
 
 if __name__ == "__main__":
     main()
