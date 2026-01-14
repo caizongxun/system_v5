@@ -231,6 +231,85 @@ def display_prediction_table(predicted_klines):
         })
     return pd.DataFrame(data)
 
+def display_model_diagnostics(pred_denorm, feature_columns):
+    """Display raw model predictions for debugging."""
+    if pred_denorm is None or len(pred_denorm) == 0:
+        st.warning("No diagnostic data available")
+        return
+    
+    st.markdown("---")
+    st.subheader("Model Predictions Diagnostic")
+    
+    try:
+        # Get feature indices
+        returns_idx = feature_columns.index('returns')
+        high_low_ratio_idx = feature_columns.index('high_low_ratio')
+        open_close_ratio_idx = feature_columns.index('open_close_ratio')
+        volume_ratio_idx = feature_columns.index('Volume_Ratio')
+        volatility_5_idx = feature_columns.index('volatility_5')
+        volatility_20_idx = feature_columns.index('volatility_20')
+        
+        # Create detailed table
+        diag_data = []
+        for i, pred_features in enumerate(pred_denorm):
+            returns = float(pred_features[returns_idx])
+            high_low_ratio = float(pred_features[high_low_ratio_idx])
+            open_close_ratio = float(pred_features[open_close_ratio_idx])
+            volume_ratio = float(pred_features[volume_ratio_idx])
+            volatility_5 = float(pred_features[volatility_5_idx])
+            volatility_20 = float(pred_features[volatility_20_idx])
+            
+            diag_data.append({
+                'Step': i + 1,
+                'Returns': f"{returns:.6f}",
+                'High/Low': f"{high_low_ratio:.6f}",
+                'Open/Close': f"{open_close_ratio:.6f}",
+                'Vol Ratio': f"{volume_ratio:.6f}",
+                'Vol(5)': f"{volatility_5:.6f}",
+                'Vol(20)': f"{volatility_20:.6f}"
+            })
+        
+        diag_df = pd.DataFrame(diag_data)
+        st.dataframe(diag_df, width='stretch', hide_index=True, use_container_width=True)
+        
+        # Summary statistics
+        st.subheader("Feature Ranges")
+        col1, col2, col3 = st.columns(3)
+        
+        returns_vals = pred_denorm[:, returns_idx]
+        high_low_vals = pred_denorm[:, high_low_ratio_idx]
+        volatility_5_vals = pred_denorm[:, volatility_5_idx]
+        
+        with col1:
+            st.metric(
+                "Returns",
+                f"{returns_vals.min():.6f} to {returns_vals.max():.6f}",
+                f"Std: {returns_vals.std():.6f}"
+            )
+        
+        with col2:
+            st.metric(
+                "High/Low Ratio",
+                f"{high_low_vals.min():.6f} to {high_low_vals.max():.6f}",
+                f"Std: {high_low_vals.std():.6f}"
+            )
+        
+        with col3:
+            st.metric(
+                "Volatility(5)",
+                f"{volatility_5_vals.min():.6f} to {volatility_5_vals.max():.6f}",
+                f"Std: {volatility_5_vals.std():.6f}"
+            )
+        
+        # Log ranges to console
+        logger.info(f"Returns range: {returns_vals.min():.6f} to {returns_vals.max():.6f}")
+        logger.info(f"High/Low ratio range: {high_low_vals.min():.6f} to {high_low_vals.max():.6f}")
+        logger.info(f"Volatility(5) range: {volatility_5_vals.min():.6f} to {volatility_5_vals.max():.6f}")
+    
+    except Exception as e:
+        st.error(f"Error displaying diagnostics: {str(e)}")
+        logger.exception(f"Diagnostic error: {str(e)}")
+
 def main():
     st.set_page_config(
         page_title="BTC Real-Time Predictor",
@@ -265,6 +344,7 @@ def main():
         
         show_table = st.checkbox("Show Predictions", value=True)
         show_analysis = st.checkbox("Show Analysis", value=True)
+        show_diagnostics = st.checkbox("Show Model Diagnostics", value=True)
         
         st.markdown("---")
         st.info("""
@@ -281,6 +361,7 @@ def main():
         st.session_state.df_current = None
         st.session_state.data_source = "Init"
         st.session_state.model_loaded = False
+        st.session_state.pred_denorm = None
     
     # Load model once
     if not st.session_state.model_loaded:
@@ -315,6 +396,7 @@ def main():
     chart_placeholder = st.empty()
     analysis_placeholder = st.empty()
     table_placeholder = st.empty()
+    diagnostics_placeholder = st.empty()
     
     # Main update loop
     current_time = time.time()
@@ -346,7 +428,7 @@ def main():
             st.session_state.df_current = df_raw.copy()
             st.session_state.scaler = scaler
             
-            # Generate predictions - use model output directly
+            # Generate predictions
             if len(normalized_data) >= 100:
                 logger.info("Generating predictions...")
                 predictor = RollingPredictor(
@@ -357,12 +439,18 @@ def main():
                 )
                 
                 X_pred = normalized_data[-100:]
+                
+                # Get predictions (returns both normalized and denormalized)
                 st.session_state.predicted_klines = predictor.predict_with_fixed_baseline(
                     X_pred, 
                     df_raw,
                     pred_steps=st.session_state.config['model']['prediction_length'],
                     volatility_multiplier=volatility_mult
                 )
+                
+                # Also get denormalized features for diagnostics
+                pred_norm = predictor.predict_single_step(X_pred)
+                st.session_state.pred_denorm = scaler.inverse_transform(pred_norm)
                 
                 logger.info(f"Generated {len(st.session_state.predicted_klines)} predictions")
             
@@ -379,7 +467,7 @@ def main():
         change = ((price - prev_price) / prev_price * 100)
         
         with time_placeholder:
-            st.metric("Time", datetime.now().strftime('%H:%M:%S'))
+            st.metric("Time", datetime.now().strftime('%H:%M'))
         with price_placeholder:
             st.metric("Price", f"${price:.2f}", f"{change:.3f}%")
         with source_placeholder:
@@ -443,7 +531,15 @@ def main():
             pred_df = display_prediction_table(st.session_state.predicted_klines)
             st.dataframe(pred_df, width='stretch', hide_index=True)
     
-    # Auto-refresh with shorter interval
+    # Display diagnostics
+    if show_diagnostics and st.session_state.pred_denorm is not None:
+        with diagnostics_placeholder.container():
+            display_model_diagnostics(
+                st.session_state.pred_denorm,
+                st.session_state.feature_columns
+            )
+    
+    # Auto-refresh
     time.sleep(1)
     st.rerun()
 
