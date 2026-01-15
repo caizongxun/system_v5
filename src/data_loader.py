@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 class DataLoader:
     def __init__(self, repo_id: str, cache_dir: str = None):
         self.repo_id = repo_id
-        self.cache_dir = cache_dir or Path("test/data")
+        self.cache_dir = Path(cache_dir) if cache_dir else Path("test/data")
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     def load_klines(self, symbol: str, timeframe: str) -> pd.DataFrame:
