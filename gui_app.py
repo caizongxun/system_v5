@@ -158,12 +158,11 @@ class AttentionLSTM(nn.Module):
 # ==================== Technical Indicators ====================
 
 def calculate_technical_indicators(df):
+    """直接使用價格和技術指標，不用 returns"""
     df = df.copy()
     
-    df['returns'] = df['close'].pct_change().fillna(0)
-    df['log_returns'] = np.log(df['close'] / df['close'].shift(1)).fillna(0)
-    df['volatility_20'] = df['returns'].rolling(window=20).std().fillna(0)
-    df['volatility_5'] = df['returns'].rolling(window=5).std().fillna(0)
+    df['volatility_20'] = df['close'].pct_change().rolling(window=20).std().fillna(0)
+    df['volatility_5'] = df['close'].pct_change().rolling(window=5).std().fillna(0)
     
     high_low = df['high'] - df['low']
     high_close = abs(df['high'] - df['close'].shift())
@@ -212,32 +211,82 @@ def calculate_technical_indicators(df):
     df = df.bfill().ffill()
     return df
 
-def denormalize_features(pred_norm, scaler):
-    return scaler.inverse_transform(pred_norm)
+def prepare_features_with_price_context(df_processed, feature_columns):
+    """加入價格上下文特徵，幫助模型理解絕對價格水平"""
+    df = df_processed.copy()
+    
+    # 價格水平特徵
+    df['price_level_high'] = df['high'] / df['high'].max()
+    df['price_level_low'] = df['low'] / df['low'].min()
+    df['price_range_pct'] = (df['high'] - df['low']) / df['close'] * 100
+    
+    # 動量特徵（替代 returns）
+    df['price_momentum_5'] = (df['close'] - df['close'].shift(5)) / df['close'].shift(5) * 100
+    df['price_momentum_10'] = (df['close'] - df['close'].shift(10)) / df['close'].shift(10) * 100
+    
+    # 趨勢強度
+    df['sma_distance'] = (df['close'] - df['sma_14']) / df['sma_14'] * 100
+    
+    enhanced_cols = feature_columns + [
+        'price_level_high', 'price_level_low', 'price_range_pct',
+        'price_momentum_5', 'price_momentum_10', 'sma_distance'
+    ]
+    return df[enhanced_cols].values, enhanced_cols
 
-def features_to_klines(df_last, pred_denorm):
+def denormalize_prices(pred_norm, scaler, price_min, price_max):
+    """反標準化並約束在合理範圍內"""
+    pred_denorm = scaler.inverse_transform(pred_norm)
+    
+    # 約束價格在歷史範圍內
+    pred_denorm = np.clip(pred_denorm, price_min * 0.95, price_max * 1.05)
+    
+    return pred_denorm
+
+def features_to_klines_with_price_guidance(df_last, pred_denorm, lookback_df):
+    """使用反標準化的特徵重建 K 線，帶有價格指導"""
     pred_klines = []
     current_open = df_last['close'].iloc[-1]
+    price_mean = lookback_df['close'].mean()
+    price_std = lookback_df['close'].std()
+    
+    logger.info(f"Price guidance: mean={price_mean:.2f}, std={price_std:.2f}")
     
     for i, features in enumerate(pred_denorm):
-        returns = float(features[0])
-        high_low_ratio = float(features[13])
+        momentum_5 = float(features[-3]) if len(features) > 15 else 0
+        momentum_10 = float(features[-2]) if len(features) > 16 else 0
+        sma_distance = float(features[-1]) if len(features) > 17 else 0
         
-        close_price = current_open * (1 + returns)
-        high_price = close_price * (1 + high_low_ratio / 2)
-        low_price = close_price * (1 - high_low_ratio / 2)
+        # 使用動量計算預期價格變化
+        expected_change_pct = (momentum_5 + momentum_10) / 2
+        close_price = current_open * (1 + expected_change_pct / 100)
         
-        volume = int(df_last['volume'].iloc[-1] * 0.5)
+        # 約束在合理範圍內
+        close_price = np.clip(close_price, price_mean * 0.98, price_mean * 1.02)
         
-        pred_klines.append({
+        # 隨機高低點
+        volatility = float(features[1]) * 100 if len(features) > 1 else 0.5
+        volatility = np.clip(volatility, 0.01, 2.0)
+        
+        range_pct = volatility / 100
+        high_price = close_price * (1 + range_pct / 2)
+        low_price = close_price * (1 - range_pct / 2)
+        
+        volume = int(df_last['volume'].iloc[-1] * 0.8)
+        
+        kline = {
             'index': i + 1,
             'open': max(min(current_open, high_price), low_price),
             'high': high_price,
             'low': low_price,
             'close': close_price,
             'volume': volume
-        })
+        }
         
+        logger.info(f"K線 {i+1}: O={kline['open']:.2f}, H={kline['high']:.2f}, "
+                   f"L={kline['low']:.2f}, C={kline['close']:.2f}, "
+                   f"Change={expected_change_pct:+.3f}%")
+        
+        pred_klines.append(kline)
         current_open = close_price
     
     return pred_klines
@@ -346,7 +395,7 @@ def create_candlestick_chart(df_historical, predicted_klines):
 class PredictorWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("BTC 15M Attention-LSTM Predictor (Local GUI)")
+        self.setWindowTitle("BTC 15M Attention-LSTM Predictor (Direct Price Forecasting)")
         self.setGeometry(100, 100, 1600, 1000)
         
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -362,7 +411,7 @@ class PredictorWindow(QMainWindow):
         self.init_ui()
         self.load_model()
         self.setup_timer()
-        self.initial_update()  # 立即執行第一次更新
+        self.initial_update()
     
     def init_ui(self):
         central_widget = QWidget()
@@ -453,7 +502,6 @@ class PredictorWindow(QMainWindow):
             self.status_label.setText("Status: Loading model...")
             
             feature_columns = [
-                'returns', 'log_returns',
                 'volatility_20', 'volatility_5',
                 'atr', 'rsi', 'macd', 'macd_signal', 'macd_diff',
                 'sma_7', 'sma_14', 'sma_21', 'kama',
@@ -462,7 +510,7 @@ class PredictorWindow(QMainWindow):
             ]
             
             self.model = AttentionLSTM(
-                input_size=17,
+                input_size=21,
                 hidden_size=256,
                 num_layers=2,
                 forecast_horizon=6,
@@ -538,16 +586,27 @@ class PredictorWindow(QMainWindow):
             logger.info("Computing technical indicators...")
             df_processed = calculate_technical_indicators(df_raw)
             
-            logger.info("Normalizing features...")
-            normalized_data = self.scaler.transform(
-                df_processed[self.feature_columns].values
+            logger.info("Preparing features with price context...")
+            feature_data, enhanced_cols = prepare_features_with_price_context(
+                df_processed, self.feature_columns
             )
+            
+            logger.info(f"Feature shape: {feature_data.shape}, cols: {len(enhanced_cols)}")
+            
+            logger.info("Normalizing features...")
+            normalized_data = self.scaler.transform(feature_data)
             
             logger.info("Making predictions...")
             X_pred = normalized_data[-100:]
             pred_norm = self.model.predict(X_pred)
-            pred_denorm = denormalize_features(pred_norm, self.scaler)
-            self.predicted_klines = features_to_klines(df_raw, pred_denorm)
+            
+            price_min = df_raw['close'].min()
+            price_max = df_raw['close'].max()
+            pred_denorm = denormalize_prices(pred_norm, self.scaler, price_min, price_max)
+            
+            self.predicted_klines = features_to_klines_with_price_guidance(
+                df_raw, pred_denorm, df_raw
+            )
             logger.info(f"Generated {len(self.predicted_klines)} predictions")
             
             current_price = float(df_raw['close'].iloc[-1])
