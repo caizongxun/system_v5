@@ -1,5 +1,5 @@
 //@version=5
-strategy("Momentum ML Strategy v1.0", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+strategy("Momentum ML Strategy v1.1 Advanced", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
 
 // ========================================================================================
 // TREND SETTINGS - EMA Multiple TimeFrame Analysis
@@ -8,13 +8,16 @@ ema20 = ta.ema(close, 20)
 ema60 = ta.ema(close, 60)
 ema120 = ta.ema(close, 120)
 
+ema9 = ta.ema(close, 9)
+ema50 = ta.ema(close, 50)
+
 // ========================================================================================
 // MOMENTUM SETTINGS - MACD Optimized for Crypto
 // ========================================================================================
 group_macd = "MACD Settings"
-macd_fast = input(5, "MACD Fast Length", group=group_macd)
-macd_slow = input(13, "MACD Slow Length", group=group_macd)
-macd_signal = input(1, "MACD Signal Length", group=group_macd)
+macd_fast = input.int(5, "MACD Fast Length", minval=1, maxval=50, group=group_macd)
+macd_slow = input.int(13, "MACD Slow Length", minval=5, maxval=100, group=group_macd)
+macd_signal = input.int(1, "MACD Signal Length", minval=1, maxval=20, group=group_macd)
 
 [macd_line, macd_signal_line, macd_histogram] = ta.macd(close, macd_fast, macd_slow, macd_signal)
 
@@ -22,37 +25,81 @@ macd_signal = input(1, "MACD Signal Length", group=group_macd)
 // RSI SETTINGS - Short-term Momentum
 // ========================================================================================
 group_rsi = "RSI Settings"
-rsi_length = input(9, "RSI Length", group=group_rsi)
+rsi_length = input.int(9, "RSI Length", minval=2, maxval=50, group=group_rsi)
 rsi_value = ta.rsi(close, rsi_length)
-rsi_oversold = input(30, "RSI Oversold (Long)", group=group_rsi)
-rsi_overbought = input(70, "RSI Overbought (Short)", group=group_rsi)
+rsi_oversold = input.int(30, "RSI Oversold Level", minval=1, maxval=50, group=group_rsi)
+rsi_overbought = input.int(70, "RSI Overbought Level", minval=50, maxval=99, group=group_rsi)
+rsi_mid = input.int(50, "RSI Midline", minval=40, maxval=60, group=group_rsi)
+
+// ========================================================================================
+// STOCHASTIC OSCILLATOR - Additional Momentum
+// ========================================================================================
+group_stoch = "Stochastic Settings"
+stoch_length = input.int(14, "Stochastic Length", minval=5, maxval=50, group=group_stoch)
+stoch_smooth_k = input.int(3, "Stochastic Smooth K", minval=1, maxval=10, group=group_stoch)
+stoch_smooth_d = input.int(3, "Stochastic Smooth D", minval=1, maxval=10, group=group_stoch)
+
+lowest_low = ta.lowest(low, stoch_length)
+highest_high = ta.highest(high, stoch_length)
+fast_k = 100 * (close - lowest_low) / (highest_high - lowest_low)
+stoch_k = ta.sma(fast_k, stoch_smooth_k)
+stoch_d = ta.sma(stoch_k, stoch_smooth_d)
+
+// ========================================================================================
+// BOLLINGER BANDS - Volatility and Support/Resistance
+// ========================================================================================
+group_bb = "Bollinger Bands Settings"
+bb_length = input.int(20, "BB Length", minval=5, maxval=50, group=group_bb)
+bb_mult = input.float(2.0, "BB Std Dev", minval=0.5, maxval=5.0, step=0.1, group=group_bb)
+
+basis = ta.sma(close, bb_length)
+dev = ta.stdev(close, bb_length) * bb_mult
+bb_upper = basis + dev
+bb_lower = basis - dev
+bb_width = (bb_upper - bb_lower) / basis * 100
 
 // ========================================================================================
 // VOLATILITY & VOLUME SETTINGS
 // ========================================================================================
 group_vol = "Volatility & Volume"
-atr_length = input(14, "ATR Length", group=group_vol)
+atr_length = input.int(14, "ATR Length", minval=5, maxval=50, group=group_vol)
 atr_value = ta.atr(atr_length)
+atr_sma = ta.sma(atr_value, 20)
+atr_ratio = atr_value / atr_sma
 
-volume_length = input(20, "Volume MA Length", group=group_vol)
+volume_length = input.int(20, "Volume MA Length", minval=5, maxval=50, group=group_vol)
 volume_ma = ta.sma(volume, volume_length)
-volume_confirmation = volume > volume_ma
+volume_ratio = volume / volume_ma
+
+// ========================================================================================
+// PRICE ACTION - Advanced Analysis
+// ========================================================================================
+group_pa = "Price Action Settings"
+highest_close = ta.highest(close, 20)
+lowest_close = ta.lowest(close, 20)
+price_range = highest_close - lowest_close
+price_position = (close - lowest_close) / price_range * 100
+
+trending_up = close > ema20 and ema20 > ema60 and ema60 > ema120
+trending_down = close < ema20 and ema20 < ema60 and ema60 < ema120
 
 // ========================================================================================
 // RISK MANAGEMENT SETTINGS
 // ========================================================================================
 group_risk = "Risk Management"
-risk_reward_ratio = input(1.5, "Risk-Reward Ratio (TP/SL)", minval=0.5, maxval=5, group=group_risk)
-position_size = input(10, "Position Size %", minval=1, maxval=100, group=group_risk)
+risk_reward_ratio = input.float(1.5, "Risk-Reward Ratio", minval=0.5, maxval=5.0, step=0.1, group=group_risk)
+position_size = input.int(10, "Position Size %", minval=1, maxval=100, group=group_risk)
 use_atr_for_stops = input(true, "Use ATR for Stop Loss", group=group_risk)
-atr_multiplier = input(2.0, "ATR Multiplier", minval=0.5, maxval=5, group=group_risk)
+atr_multiplier = input.float(2.0, "ATR Multiplier", minval=0.5, maxval=5.0, step=0.1, group=group_risk)
+max_trades_per_day = input.int(5, "Max Trades Per Day", minval=1, maxval=20, group=group_risk)
 
 // ========================================================================================
-// ML PARAMETERS - Simple Momentum Learning
+// ML PARAMETERS - Advanced Momentum Learning
 // ========================================================================================
 group_ml = "Machine Learning"
-ml_lookback = input(20, "ML Lookback Period", minval=10, maxval=50, group=group_ml)
-ml_signal_threshold = input(0.6, "ML Signal Threshold", minval=0.1, maxval=1.0, step=0.1, group=group_ml)
+ml_lookback = input.int(20, "ML Lookback Period", minval=10, maxval=50, group=group_ml)
+ml_signal_threshold = input.float(0.6, "ML Signal Threshold", minval=0.1, maxval=1.0, step=0.05, group=group_ml)
+ml_confirmation_bars = input.int(2, "ML Confirmation Bars", minval=1, maxval=5, group=group_ml)
 
 // ========================================================================================
 // FILTER SETTINGS
@@ -61,80 +108,209 @@ group_filter = "Filter Settings"
 use_volume_filter = input(true, "Require Above-Avg Volume", group=group_filter)
 use_trend_filter = input(true, "Use Trend Confirmation", group=group_filter)
 use_macd_divergence = input(false, "Use MACD Divergence Detection", group=group_filter)
+use_volatility_filter = input(true, "Use Volatility Filter", group=group_filter)
+use_stoch_confirmation = input(true, "Use Stochastic Confirmation", group=group_filter)
 
 // ========================================================================================
-// TREND DETERMINATION
+// ADVANCED MOMENTUM CALCULATION
 // ========================================================================================
-is_uptrend = ema20 > ema60 and ema60 > ema120
-is_downtrend = ema20 < ema60 and ema60 < ema120
+
+macd_strength = math.abs(macd_histogram) / (atr_value + 0.0001)
+macd_direction = macd_histogram > macd_histogram[1] ? 1 : macd_histogram < macd_histogram[1] ? -1 : 0
+macd_crossover = macd_line > macd_signal_line and macd_line[1] <= macd_signal_line ? 1 : macd_line < macd_signal_line and macd_line[1] >= macd_signal_line ? -1 : 0
+
+rsi_momentum = (rsi_value - rsi_value[5]) / 5
+rsi_extreme = rsi_value < rsi_oversold ? 1.5 : rsi_value > rsi_overbought ? -1.5 : (rsi_value < rsi_mid ? 0.5 : -0.5)
+
+stoch_buy_signal = stoch_k < 20 and stoch_d < 20 ? 1 : stoch_k > 80 and stoch_d > 80 ? -1 : 0
+stoch_crossover = stoch_k > stoch_d and stoch_k[1] <= stoch_d[1] ? 1 : stoch_k < stoch_d and stoch_k[1] >= stoch_d[1] ? -1 : 0
+
+bb_position = (close - bb_lower) / (bb_upper - bb_lower) * 100
+bb_squeeze = bb_width < 5
+bb_expansion = bb_width > 20
+
+volatility_signal = atr_ratio > 1.2 ? -1 : atr_ratio < 0.8 ? 1 : 0
+
+price_momentum = (close - close[5]) / close[5] * 100
+trend_strength = close > ema20 ? 1 : -1
+
+volume_expansion = volume > volume_ma * 1.2 ? 1 : volume < volume_ma * 0.8 ? -1 : 0
 
 // ========================================================================================
-// MOMENTUM CALCULATION (ML-LIKE SCORE)
+// COMPOSITE ML SCORE - Multi-Factor Analysis
 // ========================================================================================
-macd_momentum = macd_histogram > macd_histogram[1] and macd_histogram > 0 ? 1 : macd_histogram < macd_histogram[1] and macd_histogram < 0 ? -1 : 0
 
-rsi_signal = rsi_value < rsi_oversold ? 1 : rsi_value > rsi_overbought ? -1 : 0
+macd_factor = (macd_direction * 0.3 + macd_crossover * 0.3 + math.sign(macd_strength) * 0.2)
+rsi_factor = (rsi_extreme * 0.2 + math.sign(rsi_momentum) * 0.3)
+stoch_factor = (stoch_buy_signal * 0.25 + stoch_crossover * 0.35)
+bb_factor = (bb_position > 75 ? -0.3 : bb_position < 25 ? 0.3 : 0) + (bb_squeeze ? 0.2 : 0) + (bb_expansion ? -0.2 : 0)
+volatility_factor = volatility_signal * 0.15
+volume_factor = volume_expansion * 0.2
+price_factor = math.sign(price_momentum) * 0.25
+trend_factor = trend_strength * 0.3
 
-price_trend = close > ema20 ? 1 : -1
-
-momentum_score = (macd_momentum * 0.4) + (rsi_signal * 0.3) + (price_trend * 0.3)
-
-// ========================================================================================
-// ML SIGNAL GENERATION
-// ========================================================================================
-long_ml_signal = momentum_score > ml_signal_threshold
-short_ml_signal = momentum_score < -ml_signal_threshold
+ml_composite_score = (macd_factor + rsi_factor + stoch_factor + bb_factor + volatility_factor + volume_factor + price_factor + trend_factor) / 8
 
 // ========================================================================================
-// COMPOSITE ENTRY CONDITIONS
+// NORMALIZED SIGNAL GENERATION
 // ========================================================================================
-long_condition = (use_trend_filter ? is_uptrend : true) and long_ml_signal and (use_volume_filter ? volume_confirmation : true)
-short_condition = (use_trend_filter ? is_downtrend : true) and short_ml_signal and (use_volume_filter ? volume_confirmation : true)
+long_ml_signal = ml_composite_score > ml_signal_threshold
+short_ml_signal = ml_composite_score < -ml_signal_threshold
+strong_long_signal = ml_composite_score > ml_signal_threshold + 0.3
+strong_short_signal = ml_composite_score < -ml_signal_threshold - 0.3
 
 // ========================================================================================
-// STOP LOSS & TAKE PROFIT CALCULATION
+// TREND AND CONFIRMATION FILTERS
 // ========================================================================================
-stop_loss_distance = use_atr_for_stops ? (atr_value * atr_multiplier) : (close * 0.02)
-take_profit_distance = stop_loss_distance * risk_reward_ratio
+is_uptrend = trending_up
+is_downtrend = trending_down
+
+volume_ok = use_volume_filter ? volume > volume_ma : true
+trend_ok = use_trend_filter ? (is_uptrend or is_downtrend) : true
+stoch_ok = use_stoch_confirmation ? (stoch_k < 20 or stoch_k > 80) : true
+volatility_ok = use_volatility_filter ? (atr_ratio > 0.7 and atr_ratio < 1.8) : true
 
 // ========================================================================================
-// ENTRY & EXIT LOGIC WITH 1:1.5 RISK-REWARD RATIO
+// COUNTER-TREND DETECTION
 // ========================================================================================
-if long_condition and strategy.position_size == 0
-    strategy.entry("Long", strategy.long, qty=strategy.percent_of_equity(position_size))
+divergence_detected = (macd_histogram > macd_histogram[1] and close < close[1]) or (macd_histogram < macd_histogram[1] and close > close[1])
+
+// ========================================================================================
+// TRADE MANAGEMENT VARIABLES
+// ========================================================================================
+trades_today = 0
+var bar_index_last_trade = 0
+
+if dayofweek == dayofweek(timenow)
+    if bar_index - bar_index_last_trade < 24 * 60 / timeframe.multiplier
+        trades_today += 1
+    else
+        trades_today = 1
+        bar_index_last_trade = bar_index
+
+// ========================================================================================
+// POSITION MANAGEMENT
+// ========================================================================================
+var long_entry_price = 0.0
+var short_entry_price = 0.0
+var long_stop_loss = 0.0
+var long_take_profit = 0.0
+var short_stop_loss = 0.0
+var short_take_profit = 0.0
+
+if strategy.position_size > 0
+    long_entry_price := strategy.opentrades.entry_price(0)
+    stop_loss_distance = use_atr_for_stops ? (atr_value * atr_multiplier) : (close * 0.02)
+    long_stop_loss := long_entry_price - stop_loss_distance
+    long_take_profit := long_entry_price + (stop_loss_distance * risk_reward_ratio)
+
+if strategy.position_size < 0
+    short_entry_price := strategy.opentrades.entry_price(0)
+    stop_loss_distance = use_atr_for_stops ? (atr_value * atr_multiplier) : (close * 0.02)
+    short_stop_loss := short_entry_price + stop_loss_distance
+    short_take_profit := short_entry_price - (stop_loss_distance * risk_reward_ratio)
+
+// ========================================================================================
+// ENTRY LOGIC WITH ADVANCED FILTERS
+// ========================================================================================
+
+long_entry_condition = (long_ml_signal and is_uptrend and volume_ok and volatility_ok) or (strong_long_signal and volume_ok)
+short_entry_condition = (short_ml_signal and is_downtrend and volume_ok and volatility_ok) or (strong_short_signal and volume_ok)
+
+can_trade_long = strategy.position_size == 0 and trades_today < max_trades_per_day and long_entry_condition
+can_trade_short = strategy.position_size == 0 and trades_today < max_trades_per_day and short_entry_condition
+
+if can_trade_long
+    stop_loss_distance = use_atr_for_stops ? (atr_value * atr_multiplier) : (close * 0.02)
     long_stop = close - stop_loss_distance
-    long_profit = close + take_profit_distance
+    long_profit = close + (stop_loss_distance * risk_reward_ratio)
+    strategy.entry("Long", strategy.long, qty=strategy.percent_of_equity(position_size))
     strategy.exit("Long Exit", "Long", stop=long_stop, limit=long_profit)
+    bar_index_last_trade := bar_index
 
-if short_condition and strategy.position_size == 0
-    strategy.entry("Short", strategy.short, qty=strategy.percent_of_equity(position_size))
+if can_trade_short
+    stop_loss_distance = use_atr_for_stops ? (atr_value * atr_multiplier) : (close * 0.02)
     short_stop = close + stop_loss_distance
-    short_profit = close - take_profit_distance
+    short_profit = close - (stop_loss_distance * risk_reward_ratio)
+    strategy.entry("Short", strategy.short, qty=strategy.percent_of_equity(position_size))
     strategy.exit("Short Exit", "Short", stop=short_stop, limit=short_profit)
+    bar_index_last_trade := bar_index
+
+// ========================================================================================
+// EXIT LOGIC - Smart Position Management
+// ========================================================================================
+
+if strategy.position_size > 0
+    if close < long_stop_loss or close > long_take_profit
+        strategy.close("Long")
+    else if divergence_detected and use_macd_divergence
+        strategy.close("Long")
+    else if rsi_value > 85
+        strategy.close("Long")
+
+if strategy.position_size < 0
+    if close > short_stop_loss or close < short_take_profit
+        strategy.close("Short")
+    else if divergence_detected and use_macd_divergence
+        strategy.close("Short")
+    else if rsi_value < 15
+        strategy.close("Short")
 
 // ========================================================================================
 // VISUALIZATION - Trend Lines
 // ========================================================================================
-plot(ema20, "EMA 20", color=color.blue, linewidth=1)
-plot(ema60, "EMA 60", color=color.orange, linewidth=1)
-plot(ema120, "EMA 120", color=color.red, linewidth=1)
+plot(ema9, "EMA 9", color=color.new(color.aqua, 20), linewidth=1)
+plot(ema20, "EMA 20", color=color.new(color.blue, 0), linewidth=2)
+plot(ema50, "EMA 50", color=color.new(color.orange, 0), linewidth=1)
+plot(ema60, "EMA 60", color=color.new(color.orange, 20), linewidth=1)
+plot(ema120, "EMA 120", color=color.new(color.red, 0), linewidth=2)
+
+// ========================================================================================
+// VISUALIZATION - Bollinger Bands
+// ========================================================================================
+plot(bb_upper, "BB Upper", color=color.new(color.gray, 50), linewidth=1)
+plot(basis, "BB Basis", color=color.new(color.gray, 30), linewidth=1)
+plot(bb_lower, "BB Lower", color=color.new(color.gray, 50), linewidth=1)
 
 // ========================================================================================
 // VISUALIZATION - RSI
 // ========================================================================================
-plot(rsi_value, "RSI (9)", color=color.purple, linewidth=1, scale=scale.right)
-hline(rsi_oversold, "RSI Oversold", color=color.gray, linestyle=hline.style_dashed)
-hline(rsi_overbought, "RSI Overbought", color=color.gray, linestyle=hline.style_dashed)
-hline(50, "RSI Midline", color=color.gray, linestyle=hline.style_dotted)
+plot(rsi_value, "RSI (9)", color=color.new(color.purple, 0), linewidth=2, scale=scale.right)
+hline(rsi_oversold, "RSI Oversold", color=color.new(color.green, 50), linestyle=hline.style_dashed)
+hline(rsi_overbought, "RSI Overbought", color=color.new(color.red, 50), linestyle=hline.style_dashed)
+hline(rsi_mid, "RSI Midline", color=color.new(color.gray, 60), linestyle=hline.style_dotted)
 
 // ========================================================================================
-// VISUALIZATION - MACD Histogram
+// VISUALIZATION - MACD
 // ========================================================================================
-colors = macd_histogram >= 0 ? color.new(color.green, 30) : color.new(color.red, 30)
-plot(macd_histogram, "MACD Histogram", color=colors, style=plot.style_columns, scale=scale.right)
+macd_colors = macd_histogram >= 0 ? color.new(color.green, 20) : color.new(color.red, 20)
+plot(macd_histogram, "MACD Histogram", color=macd_colors, style=plot.style_columns, scale=scale.right)
+plot(macd_line, "MACD Line", color=color.new(color.blue, 30), linewidth=1, scale=scale.right)
+plot(macd_signal_line, "Signal Line", color=color.new(color.orange, 30), linewidth=1, scale=scale.right)
+
+// ========================================================================================
+// VISUALIZATION - Stochastic
+// ========================================================================================
+plot(stoch_k, "Stoch K", color=color.new(color.blue, 40), linewidth=1, scale=scale.right)
+plot(stoch_d, "Stoch D", color=color.new(color.red, 40), linewidth=1, scale=scale.right)
+hline(20, "Stoch Lower", color=color.new(color.gray, 50), linestyle=hline.style_dotted, scale=scale.right)
+hline(80, "Stoch Upper", color=color.new(color.gray, 50), linestyle=hline.style_dotted, scale=scale.right)
+
+// ========================================================================================
+// BACKGROUND COLORING - Market Conditions
+// ========================================================================================
+bg_color = trending_up ? color.new(color.green, 95) : trending_down ? color.new(color.red, 95) : color.new(color.gray, 97)
+fill_color = bb_squeeze ? color.new(color.yellow, 90) : na
+
+background = plot(na, display=display.none, title="Background")
+plot(na, display=display.none)
 
 // ========================================================================================
 // SIGNAL ALERTS
 // ========================================================================================
-alertcondition(long_condition, title="Long Signal", message="Momentum ML Long Signal triggered on 15m")
-alertcondition(short_condition, title="Short Signal", message="Momentum ML Short Signal triggered on 15m")
+alertcondition(long_entry_condition, title="Long Entry Signal", message="Strong Long Signal: Momentum ML triggered on 15m")
+alertcondition(short_entry_condition, title="Short Entry Signal", message="Strong Short Signal: Momentum ML triggered on 15m")
+alertcondition(divergence_detected, title="Divergence Alert", message="MACD-Price Divergence Detected")
+alertcondition(bb_squeeze, title="Bollinger Bands Squeeze", message="BB Squeeze Detected - Prepare for Volatility")
+alertcondition(strategy.position_size > 0 and close < long_stop_loss, title="Long Stop Hit", message="Long Position Hit Stop Loss")
+alertcondition(strategy.position_size < 0 and close > short_stop_loss, title="Short Stop Hit", message="Short Position Hit Stop Loss")
