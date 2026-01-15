@@ -310,102 +310,104 @@ def features_to_klines(df_last, pred_denorm, lookback=100):
     
     return pred_klines
 
-def create_base_chart(df_historical):
-    df_plot = df_historical.tail(100).copy()
-    
-    if 'open_time' in df_plot.columns:
-        if isinstance(df_plot['open_time'].iloc[0], str):
-            df_plot['open_time'] = pd.to_datetime(df_plot['open_time'])
-    else:
-        df_plot['open_time'] = pd.date_range(
-            end=datetime.now(),
-            periods=len(df_plot),
-            freq='15min'
+def plot_klines_chart(df_historical, predicted_klines):
+    try:
+        df_plot = df_historical.tail(100).copy()
+        
+        if 'open_time' in df_plot.columns:
+            if isinstance(df_plot['open_time'].iloc[0], str):
+                df_plot['open_time'] = pd.to_datetime(df_plot['open_time'])
+        else:
+            df_plot['open_time'] = pd.date_range(
+                end=datetime.now(),
+                periods=len(df_plot),
+                freq='15min'
+            )
+        
+        fig = make_subplots(
+            rows=2, cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.1,
+            row_heights=[0.7, 0.3],
+            subplot_titles=("BTC/USDT 15M - Realtime Predictions", "Volume")
         )
-    
-    fig = make_subplots(
-        rows=2, cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.1,
-        row_heights=[0.7, 0.3],
-        subplot_titles=("BTC/USDT 15M - Realtime Predictions", "Volume")
-    )
-    
-    fig.add_trace(
-        go.Candlestick(
-            x=df_plot['open_time'],
-            open=df_plot['open'],
-            high=df_plot['high'],
-            low=df_plot['low'],
-            close=df_plot['close'],
-            name='Market',
-            increasing=dict(fillcolor='green', line=dict(color='green')),
-            decreasing=dict(fillcolor='red', line=dict(color='red'))
-        ),
-        row=1, col=1
-    )
-    
-    fig.add_trace(
-        go.Bar(
-            x=df_plot['open_time'],
-            y=df_plot['volume'],
-            name='Historical Volume',
-            marker=dict(color='rgba(128, 128, 128, 0.3)'),
-            showlegend=False
-        ),
-        row=2, col=1
-    )
-    
-    fig.update_layout(
-        title="BTC/USDT 15M Real-Time Chart with Attention-LSTM Predictions",
-        yaxis_title='Price (USDT)',
-        xaxis_rangeslider_visible=False,
-        height=700,
-        hovermode='x unified',
-        template='plotly_dark',
-        margin=dict(l=0, r=0, t=50, b=0)
-    )
-    
-    fig.update_yaxes(title_text="Price (USDT)", row=1, col=1)
-    fig.update_yaxes(title_text="Volume", row=2, col=1)
-    
-    return fig
-
-def update_chart_with_predictions(fig, predicted_klines):
-    if predicted_klines and len(predicted_klines) > 0:
-        pred_times = [k['time'] for k in predicted_klines]
-        pred_opens = [float(k['open']) for k in predicted_klines]
-        pred_highs = [float(k['high']) for k in predicted_klines]
-        pred_lows = [float(k['low']) for k in predicted_klines]
-        pred_closes = [float(k['close']) for k in predicted_klines]
-        pred_volumes = [float(k['volume']) for k in predicted_klines]
         
         fig.add_trace(
             go.Candlestick(
-                x=pred_times,
-                open=pred_opens,
-                high=pred_highs,
-                low=pred_lows,
-                close=pred_closes,
-                name='Predictions (6 bars)',
-                increasing=dict(fillcolor='cyan', line=dict(color='cyan')),
-                decreasing=dict(fillcolor='orange', line=dict(color='orange'))
+                x=df_plot['open_time'],
+                open=df_plot['open'],
+                high=df_plot['high'],
+                low=df_plot['low'],
+                close=df_plot['close'],
+                name='Market',
+                increasing=dict(fillcolor='green', line=dict(color='green')),
+                decreasing=dict(fillcolor='red', line=dict(color='red'))
             ),
             row=1, col=1
         )
         
+        if predicted_klines and len(predicted_klines) > 0:
+            pred_times = [k['time'] for k in predicted_klines]
+            pred_opens = [float(k['open']) for k in predicted_klines]
+            pred_highs = [float(k['high']) for k in predicted_klines]
+            pred_lows = [float(k['low']) for k in predicted_klines]
+            pred_closes = [float(k['close']) for k in predicted_klines]
+            pred_volumes = [float(k['volume']) for k in predicted_klines]
+            
+            fig.add_trace(
+                go.Candlestick(
+                    x=pred_times,
+                    open=pred_opens,
+                    high=pred_highs,
+                    low=pred_lows,
+                    close=pred_closes,
+                    name='Predictions (6 bars)',
+                    increasing=dict(fillcolor='cyan', line=dict(color='cyan')),
+                    decreasing=dict(fillcolor='orange', line=dict(color='orange'))
+                ),
+                row=1, col=1
+            )
+            
+            fig.add_trace(
+                go.Bar(
+                    x=pred_times,
+                    y=pred_volumes,
+                    name='Pred Volume',
+                    marker=dict(color='rgba(0, 255, 255, 0.5)'),
+                    showlegend=False
+                ),
+                row=2, col=1
+            )
+        
         fig.add_trace(
             go.Bar(
-                x=pred_times,
-                y=pred_volumes,
-                name='Pred Volume',
-                marker=dict(color='rgba(0, 255, 255, 0.5)'),
+                x=df_plot['open_time'],
+                y=df_plot['volume'],
+                name='Historical Volume',
+                marker=dict(color='rgba(128, 128, 128, 0.3)'),
                 showlegend=False
             ),
             row=2, col=1
         )
+        
+        fig.update_layout(
+            title="BTC/USDT 15M Real-Time Chart with Attention-LSTM Predictions",
+            yaxis_title='Price (USDT)',
+            xaxis_rangeslider_visible=False,
+            height=700,
+            hovermode='x unified',
+            template='plotly_dark',
+            margin=dict(l=0, r=0, t=50, b=0)
+        )
+        
+        fig.update_yaxes(title_text="Price (USDT)", row=1, col=1)
+        fig.update_yaxes(title_text="Volume", row=2, col=1)
+        
+        return fig
     
-    return fig
+    except Exception as e:
+        logger.error(f"Error creating chart: {str(e)}")
+        return None
 
 def display_prediction_table(predicted_klines):
     data = []
@@ -462,8 +464,6 @@ def main():
         st.session_state.predicted_klines = []
         st.session_state.df_current = None
         st.session_state.model_loaded = False
-        st.session_state.chart = None
-        st.session_state.chart_data_hash = None
     
     if not st.session_state.model_loaded:
         try:
@@ -558,15 +558,15 @@ def main():
         st.subheader("Chart with Predictions")
         
         if st.session_state.df_current is not None:
-            if st.session_state.chart is None:
-                st.session_state.chart = create_base_chart(st.session_state.df_current)
-            
-            fig = update_chart_with_predictions(
-                st.session_state.chart,
+            fig = plot_klines_chart(
+                st.session_state.df_current,
                 st.session_state.predicted_klines
             )
             
-            st.plotly_chart(fig, use_container_width=True)
+            if fig is not None:
+                st.plotly_chart(fig, width='stretch')
+            else:
+                st.error("Chart generation failed")
         else:
             st.warning("Waiting for data...")
     
@@ -576,7 +576,7 @@ def main():
             st.subheader("Next 6 Candle Predictions")
             
             pred_df = display_prediction_table(st.session_state.predicted_klines)
-            st.dataframe(pred_df, use_container_width=True, hide_index=True)
+            st.dataframe(pred_df, width='stretch', hide_index=True)
     
     if show_metrics and st.session_state.df_current is not None and st.session_state.predicted_klines:
         with metrics_placeholder.container():
