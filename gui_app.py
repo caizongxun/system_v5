@@ -10,6 +10,7 @@ import logging
 import pickle
 import time
 import warnings
+import traceback
 
 warnings.filterwarnings('ignore', category=UserWarning, message='.*feature names.*')
 
@@ -29,7 +30,10 @@ from PyQt5.QtWebEngineWidgets import QWebEngineView
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # ==================== Model Architecture ====================
@@ -334,6 +338,7 @@ def create_candlestick_chart(df_historical, predicted_klines):
     
     except Exception as e:
         logger.error(f"Error creating chart: {str(e)}")
+        logger.error(traceback.format_exc())
         return None
 
 # ==================== Main Window ====================
@@ -352,9 +357,12 @@ class PredictorWindow(QMainWindow):
         self.last_data = None
         self.predicted_klines = []
         
+        logger.info(f"Initializing GUI with device: {self.device}")
+        
         self.init_ui()
         self.load_model()
         self.setup_timer()
+        self.initial_update()  # 立即執行第一次更新
     
     def init_ui(self):
         central_widget = QWidget()
@@ -441,6 +449,7 @@ class PredictorWindow(QMainWindow):
     
     def load_model(self):
         try:
+            logger.info("Loading Attention-LSTM model...")
             self.status_label.setText("Status: Loading model...")
             
             feature_columns = [
@@ -464,17 +473,22 @@ class PredictorWindow(QMainWindow):
             )
             
             model_path = Path('test/models/attention_lstm.pt')
+            logger.info(f"Loading model from {model_path}")
             self.model.load(str(model_path))
             
             with open(Path('test/models/scaler.pkl'), 'rb') as f:
                 self.scaler = pickle.load(f)
+            logger.info("Scaler loaded")
             
             try:
                 with open(Path('test/models/feature_columns.pkl'), 'rb') as f:
                     self.feature_columns = pickle.load(f)
+                logger.info(f"Loaded {len(self.feature_columns)} feature columns from file")
             except:
                 self.feature_columns = feature_columns
+                logger.info("Using default feature columns")
             
+            logger.info("Initializing DataLoader...")
             self.loader = DataLoader(
                 repo_id='zongowo111/v2-crypto-ohlcv-data',
                 cache_dir='test/data'
@@ -484,10 +498,13 @@ class PredictorWindow(QMainWindow):
             logger.info("Model loaded successfully")
         
         except Exception as e:
-            self.status_label.setText(f"Error: {str(e)}")
             logger.error(f"Failed to load model: {str(e)}")
+            logger.error(traceback.format_exc())
+            self.status_label.setText(f"Error: {str(e)}")
     
     def setup_timer(self):
+        logger.info(f"Setting up timers with {self.refresh_spin.value()}s refresh interval")
+        
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_predictions)
         self.timer.start(self.refresh_spin.value() * 1000)
@@ -496,32 +513,48 @@ class PredictorWindow(QMainWindow):
         self.clock_timer.timeout.connect(self.update_clock)
         self.clock_timer.start(1000)
     
+    def initial_update(self):
+        logger.info("Performing initial data update...")
+        self.update_predictions()
+    
     def update_clock(self):
         current_time = datetime.now().strftime('%H:%M:%S')
         self.time_label.setText(f"Time: {current_time}")
     
     def update_predictions(self):
         try:
+            logger.info("Fetching data from HuggingFace...")
             df_raw = self.loader.load_klines(symbol='BTCUSDT', timeframe='15m')
+            logger.info(f"Loaded {len(df_raw)} candles")
+            
             df_raw = df_raw.tail(200)
             
             if len(df_raw) < 100:
-                self.status_label.setText(f"Not enough data: {len(df_raw)} < 100")
+                msg = f"Not enough data: {len(df_raw)} < 100"
+                logger.warning(msg)
+                self.status_bar.setText(msg)
                 return
             
+            logger.info("Computing technical indicators...")
             df_processed = calculate_technical_indicators(df_raw)
+            
+            logger.info("Normalizing features...")
             normalized_data = self.scaler.transform(
                 df_processed[self.feature_columns].values
             )
             
+            logger.info("Making predictions...")
             X_pred = normalized_data[-100:]
             pred_norm = self.model.predict(X_pred)
             pred_denorm = denormalize_features(pred_norm, self.scaler)
             self.predicted_klines = features_to_klines(df_raw, pred_denorm)
+            logger.info(f"Generated {len(self.predicted_klines)} predictions")
             
             current_price = float(df_raw['close'].iloc[-1])
             prev_price = float(df_raw['close'].iloc[-2])
             change_pct = ((current_price - prev_price) / prev_price * 100)
+            
+            logger.info(f"Current price: ${current_price:.2f}, Change: {change_pct:+.3f}%")
             
             self.price_label.setText(f"Price: ${current_price:,.2f}")
             color = "green" if change_pct >= 0 else "red"
@@ -534,12 +567,16 @@ class PredictorWindow(QMainWindow):
             
             self.status_bar.setText(f"Updated: {datetime.now().strftime('%H:%M:%S')} - {len(self.predicted_klines)} predictions")
             self.last_data = df_raw
+            logger.info("Update completed successfully")
         
         except Exception as e:
             logger.error(f"Update error: {str(e)}")
+            logger.error(traceback.format_exc())
             self.status_label.setText(f"Error: {str(e)}")
+            self.status_bar.setText(f"Error: {str(e)}")
     
     def update_table(self):
+        logger.info(f"Updating table with {len(self.predicted_klines)} rows")
         self.table.setRowCount(len(self.predicted_klines))
         for i, kline in enumerate(self.predicted_klines):
             step = QTableWidgetItem(str(kline['index']))
@@ -564,9 +601,13 @@ class PredictorWindow(QMainWindow):
             self.table.setItem(i, 6, vol_item)
     
     def update_chart(self, df_historical):
+        logger.info("Generating candlestick chart...")
         html_content = create_candlestick_chart(df_historical, self.predicted_klines)
         if html_content:
+            logger.info("Chart generated successfully, rendering...")
             self.chart_view.setHtml(html_content)
+        else:
+            logger.warning("Failed to generate chart")
     
     def update_analysis(self):
         if len(self.predicted_klines) > 0:
@@ -578,14 +619,18 @@ class PredictorWindow(QMainWindow):
             self.highest_label.setText(f"High: ${max(highs):.2f}")
             self.lowest_label.setText(f"Low: ${min(lows):.2f}")
             self.range_label.setText(f"Range: ${max(highs) - min(lows):.2f}")
+            logger.info(f"Analysis updated: Final=${closes[-1]:.2f}, High=${max(highs):.2f}, Low=${min(lows):.2f}")
     
     def closeEvent(self, event):
+        logger.info("Closing application...")
         self.timer.stop()
         self.clock_timer.stop()
         event.accept()
 
 if __name__ == '__main__':
+    logger.info("Starting BTC Predictor GUI...")
     app = QApplication(sys.argv)
     window = PredictorWindow()
     window.show()
+    logger.info("GUI window displayed")
     sys.exit(app.exec_())
