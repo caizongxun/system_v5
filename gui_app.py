@@ -8,7 +8,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import logging
 import pickle
-import threading
 import time
 import warnings
 
@@ -21,13 +20,14 @@ from src.data_loader import DataLoader
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-    QLabel, QSpinBox, QCheckBox, QPushButton, QTableWidget, QTableWidgetItem,
-    QGridLayout, QGroupBox, QProgressBar, QComboBox
+    QLabel, QSpinBox, QCheckBox, QTableWidget, QTableWidgetItem,
+    QGridLayout, QGroupBox, QScrollArea
 )
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread, QObject
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject, QUrl
 from PyQt5.QtGui import QFont, QColor
-from PyQt5.QtChart import QChart, QChartView, QCandlestickSeries, QCandlestickSet
-from PyQt5.QtCore import QDate, QDateTime, QTime
+from PyQt5.QtWebEngineWidgets import QWebEngineView
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -238,65 +238,103 @@ def features_to_klines(df_last, pred_denorm):
     
     return pred_klines
 
-# ==================== Worker Thread ====================
-
-class PredictionWorker(QObject):
-    finished = pyqtSignal()
-    error = pyqtSignal(str)
-    result_updated = pyqtSignal(dict)
-    
-    def __init__(self, model, scaler, feature_columns, device):
-        super().__init__()
-        self.model = model
-        self.scaler = scaler
-        self.feature_columns = feature_columns
-        self.device = device
-        self.running = True
-    
-    def run(self, refresh_interval=60):
-        loader = DataLoader(
-            repo_id='zongowo111/v2-crypto-ohlcv-data',
-            cache_dir='test/data'
+def create_candlestick_chart(df_historical, predicted_klines):
+    try:
+        df_plot = df_historical.tail(100).copy()
+        
+        if 'open_time' in df_plot.columns:
+            if isinstance(df_plot['open_time'].iloc[0], str):
+                df_plot['open_time'] = pd.to_datetime(df_plot['open_time'])
+        else:
+            df_plot['open_time'] = pd.date_range(
+                end=datetime.now(),
+                periods=len(df_plot),
+                freq='15min'
+            )
+        
+        fig = make_subplots(
+            rows=2, cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.1,
+            row_heights=[0.7, 0.3]
         )
         
-        while self.running:
-            try:
-                df_raw = loader.load_klines(symbol='BTCUSDT', timeframe='15m')
-                df_raw = df_raw.tail(200)
-                
-                if len(df_raw) < 100:
-                    self.error.emit(f"Not enough data: {len(df_raw)} < 100")
-                    time.sleep(refresh_interval)
-                    continue
-                
-                df_processed = calculate_technical_indicators(df_raw)
-                normalized_data = self.scaler.transform(
-                    df_processed[self.feature_columns].values
-                )
-                
-                X_pred = normalized_data[-100:]
-                pred_norm = self.model.predict(X_pred)
-                pred_denorm = denormalize_features(pred_norm, self.scaler)
-                pred_klines = features_to_klines(df_raw, pred_denorm)
-                
-                current_price = float(df_raw['close'].iloc[-1])
-                prev_price = float(df_raw['close'].iloc[-2])
-                change_pct = ((current_price - prev_price) / prev_price * 100)
-                
-                self.result_updated.emit({
-                    'timestamp': datetime.now(),
-                    'price': current_price,
-                    'change_pct': change_pct,
-                    'klines': pred_klines,
-                    'historical': df_raw
-                })
-                
-                time.sleep(refresh_interval)
+        fig.add_trace(
+            go.Candlestick(
+                x=df_plot['open_time'],
+                open=df_plot['open'],
+                high=df_plot['high'],
+                low=df_plot['low'],
+                close=df_plot['close'],
+                name='Historical',
+                increasing=dict(fillcolor='green', line=dict(color='green')),
+                decreasing=dict(fillcolor='red', line=dict(color='red'))
+            ),
+            row=1, col=1
+        )
+        
+        if predicted_klines and len(predicted_klines) > 0:
+            pred_times = [datetime.now() + timedelta(minutes=15*(i+1)) for i in range(len(predicted_klines))]
+            pred_opens = [float(k['open']) for k in predicted_klines]
+            pred_highs = [float(k['high']) for k in predicted_klines]
+            pred_lows = [float(k['low']) for k in predicted_klines]
+            pred_closes = [float(k['close']) for k in predicted_klines]
+            pred_volumes = [float(k['volume']) for k in predicted_klines]
             
-            except Exception as e:
-                logger.error(f"Prediction error: {str(e)}")
-                self.error.emit(f"Error: {str(e)}")
-                time.sleep(refresh_interval)
+            fig.add_trace(
+                go.Candlestick(
+                    x=pred_times,
+                    open=pred_opens,
+                    high=pred_highs,
+                    low=pred_lows,
+                    close=pred_closes,
+                    name='Predictions',
+                    increasing=dict(fillcolor='cyan', line=dict(color='cyan')),
+                    decreasing=dict(fillcolor='orange', line=dict(color='orange'))
+                ),
+                row=1, col=1
+            )
+            
+            fig.add_trace(
+                go.Bar(
+                    x=pred_times,
+                    y=pred_volumes,
+                    name='Pred Volume',
+                    marker=dict(color='rgba(0, 255, 255, 0.5)'),
+                    showlegend=False
+                ),
+                row=2, col=1
+            )
+        
+        fig.add_trace(
+            go.Bar(
+                x=df_plot['open_time'],
+                y=df_plot['volume'],
+                name='Historical Volume',
+                marker=dict(color='rgba(128, 128, 128, 0.3)'),
+                showlegend=False
+            ),
+            row=2, col=1
+        )
+        
+        fig.update_layout(
+            title="BTC/USDT 15M Real-Time Chart with Attention-LSTM Predictions",
+            yaxis_title='Price (USDT)',
+            xaxis_rangeslider_visible=False,
+            height=600,
+            hovermode='x unified',
+            template='plotly_dark',
+            margin=dict(l=0, r=0, t=50, b=0)
+        )
+        
+        fig.update_yaxes(title_text="Price (USDT)", row=1, col=1)
+        fig.update_yaxes(title_text="Volume", row=2, col=1)
+        
+        return fig.to_html(include_plotlyjs='cdn')
+    
+    except Exception as e:
+        logger.error(f"Error creating chart: {str(e)}")
+        return None
 
 # ==================== Main Window ====================
 
@@ -304,18 +342,19 @@ class PredictorWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("BTC 15M Attention-LSTM Predictor (Local GUI)")
-        self.setGeometry(100, 100, 1400, 900)
+        self.setGeometry(100, 100, 1600, 1000)
         
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model = None
         self.scaler = None
         self.feature_columns = None
-        self.worker_thread = None
-        self.worker = None
+        self.loader = None
+        self.last_data = None
+        self.predicted_klines = []
         
         self.init_ui()
         self.load_model()
-        self.start_worker()
+        self.setup_timer()
     
     def init_ui(self):
         central_widget = QWidget()
@@ -365,7 +404,7 @@ class PredictorWindow(QMainWindow):
         self.table.setHorizontalHeaderLabels(
             ["Step", "Open", "High", "Low", "Close", "Change%", "Volume"]
         )
-        self.table.setMaximumWidth(500)
+        self.table.setMaximumWidth(550)
         left_layout.addWidget(self.table)
         
         analysis_group = QGroupBox("Analysis")
@@ -383,15 +422,18 @@ class PredictorWindow(QMainWindow):
         left_layout.addWidget(analysis_group)
         left_layout.addStretch()
         
-        content_layout.addLayout(left_layout)
+        content_layout.addLayout(left_layout, 1)
         
         right_layout = QVBoxLayout()
         right_layout.addWidget(QLabel("Candlestick Chart (Last 100 + 6 Predictions):"))
         
+        self.chart_view = QWebEngineView()
+        right_layout.addWidget(self.chart_view)
+        
         self.status_bar = QLabel("Waiting for data...")
         right_layout.addWidget(self.status_bar)
         
-        content_layout.addLayout(right_layout)
+        content_layout.addLayout(right_layout, 3)
         
         main_layout.addLayout(content_layout)
         
@@ -433,6 +475,11 @@ class PredictorWindow(QMainWindow):
             except:
                 self.feature_columns = feature_columns
             
+            self.loader = DataLoader(
+                repo_id='zongowo111/v2-crypto-ohlcv-data',
+                cache_dir='test/data'
+            )
+            
             self.status_label.setText(f"Status: Ready (Device: {self.device})")
             logger.info("Model loaded successfully")
         
@@ -440,41 +487,61 @@ class PredictorWindow(QMainWindow):
             self.status_label.setText(f"Error: {str(e)}")
             logger.error(f"Failed to load model: {str(e)}")
     
-    def start_worker(self):
-        if self.model is None:
-            return
+    def setup_timer(self):
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_predictions)
+        self.timer.start(self.refresh_spin.value() * 1000)
         
-        self.worker = PredictionWorker(
-            self.model,
-            self.scaler,
-            self.feature_columns,
-            self.device
-        )
-        self.worker_thread = QThread()
-        self.worker.moveToThread(self.worker_thread)
-        
-        self.worker_thread.started.connect(
-            lambda: self.worker.run(self.refresh_spin.value())
-        )
-        self.worker.result_updated.connect(self.update_results)
-        self.worker.error.connect(self.handle_error)
-        
-        self.worker_thread.start()
+        self.clock_timer = QTimer()
+        self.clock_timer.timeout.connect(self.update_clock)
+        self.clock_timer.start(1000)
     
-    def update_results(self, data):
-        timestamp = data['timestamp']
-        price = data['price']
-        change_pct = data['change_pct']
-        klines = data['klines']
+    def update_clock(self):
+        current_time = datetime.now().strftime('%H:%M:%S')
+        self.time_label.setText(f"Time: {current_time}")
+    
+    def update_predictions(self):
+        try:
+            df_raw = self.loader.load_klines(symbol='BTCUSDT', timeframe='15m')
+            df_raw = df_raw.tail(200)
+            
+            if len(df_raw) < 100:
+                self.status_label.setText(f"Not enough data: {len(df_raw)} < 100")
+                return
+            
+            df_processed = calculate_technical_indicators(df_raw)
+            normalized_data = self.scaler.transform(
+                df_processed[self.feature_columns].values
+            )
+            
+            X_pred = normalized_data[-100:]
+            pred_norm = self.model.predict(X_pred)
+            pred_denorm = denormalize_features(pred_norm, self.scaler)
+            self.predicted_klines = features_to_klines(df_raw, pred_denorm)
+            
+            current_price = float(df_raw['close'].iloc[-1])
+            prev_price = float(df_raw['close'].iloc[-2])
+            change_pct = ((current_price - prev_price) / prev_price * 100)
+            
+            self.price_label.setText(f"Price: ${current_price:,.2f}")
+            color = "green" if change_pct >= 0 else "red"
+            self.change_label.setText(f"Change: {change_pct:+.3f}%")
+            self.change_label.setStyleSheet(f"color: {color};")
+            
+            self.update_table()
+            self.update_chart(df_raw)
+            self.update_analysis()
+            
+            self.status_bar.setText(f"Updated: {datetime.now().strftime('%H:%M:%S')} - {len(self.predicted_klines)} predictions")
+            self.last_data = df_raw
         
-        self.time_label.setText(f"Time: {timestamp.strftime('%H:%M:%S')}")
-        self.price_label.setText(f"Price: ${price:,.2f}")
-        color = "green" if change_pct >= 0 else "red"
-        self.change_label.setText(f"Change: {change_pct:+.3f}%")
-        self.change_label.setStyleSheet(f"color: {color};")
-        
-        self.table.setRowCount(len(klines))
-        for i, kline in enumerate(klines):
+        except Exception as e:
+            logger.error(f"Update error: {str(e)}")
+            self.status_label.setText(f"Error: {str(e)}")
+    
+    def update_table(self):
+        self.table.setRowCount(len(self.predicted_klines))
+        for i, kline in enumerate(self.predicted_klines):
             step = QTableWidgetItem(str(kline['index']))
             open_item = QTableWidgetItem(f"${kline['open']:.2f}")
             high_item = QTableWidgetItem(f"${kline['high']:.2f}")
@@ -495,29 +562,26 @@ class PredictorWindow(QMainWindow):
             self.table.setItem(i, 4, close_item)
             self.table.setItem(i, 5, change_item)
             self.table.setItem(i, 6, vol_item)
-        
-        if len(klines) > 0:
-            closes = [k['close'] for k in klines]
-            highs = [k['high'] for k in klines]
-            lows = [k['low'] for k in klines]
+    
+    def update_chart(self, df_historical):
+        html_content = create_candlestick_chart(df_historical, self.predicted_klines)
+        if html_content:
+            self.chart_view.setHtml(html_content)
+    
+    def update_analysis(self):
+        if len(self.predicted_klines) > 0:
+            closes = [k['close'] for k in self.predicted_klines]
+            highs = [k['high'] for k in self.predicted_klines]
+            lows = [k['low'] for k in self.predicted_klines]
             
             self.final_close_label.setText(f"Final: ${closes[-1]:.2f}")
             self.highest_label.setText(f"High: ${max(highs):.2f}")
             self.lowest_label.setText(f"Low: ${min(lows):.2f}")
             self.range_label.setText(f"Range: ${max(highs) - min(lows):.2f}")
-        
-        self.status_bar.setText(f"Updated: {timestamp.strftime('%H:%M:%S')} - {len(klines)} predictions")
-    
-    def handle_error(self, error_msg):
-        self.status_label.setText(f"Error: {error_msg}")
-        logger.error(error_msg)
     
     def closeEvent(self, event):
-        if self.worker:
-            self.worker.running = False
-        if self.worker_thread:
-            self.worker_thread.quit()
-            self.worker_thread.wait()
+        self.timer.stop()
+        self.clock_timer.stop()
         event.accept()
 
 if __name__ == '__main__':
