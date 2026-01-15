@@ -130,7 +130,9 @@ class AttentionLSTM(nn.Module):
         return torch.cat(predictions, dim=1), attn_weights
     
     def load(self, path):
-        self.load_state_dict(torch.load(path, map_location=self.device))
+        checkpoint = torch.load(path, map_location=self.device)
+        self.load_state_dict(checkpoint)
+        self.to(self.device)
         self.eval()
     
     def predict(self, X):
