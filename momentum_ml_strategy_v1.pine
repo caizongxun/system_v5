@@ -1,0 +1,140 @@
+//@version=5
+strategy("Momentum ML Strategy v1.0", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// ========================================================================================
+// TREND SETTINGS - EMA Multiple TimeFrame Analysis
+// ========================================================================================
+ema20 = ta.ema(close, 20)
+ema60 = ta.ema(close, 60)
+ema120 = ta.ema(close, 120)
+
+// ========================================================================================
+// MOMENTUM SETTINGS - MACD Optimized for Crypto
+// ========================================================================================
+group_macd = "MACD Settings"
+macd_fast = input(5, "MACD Fast Length", group=group_macd)
+macd_slow = input(13, "MACD Slow Length", group=group_macd)
+macd_signal = input(1, "MACD Signal Length", group=group_macd)
+
+[macd_line, macd_signal_line, macd_histogram] = ta.macd(close, macd_fast, macd_slow, macd_signal)
+
+// ========================================================================================
+// RSI SETTINGS - Short-term Momentum
+// ========================================================================================
+group_rsi = "RSI Settings"
+rsi_length = input(9, "RSI Length", group=group_rsi)
+rsi_value = ta.rsi(close, rsi_length)
+rsi_oversold = input(30, "RSI Oversold (Long)", group=group_rsi)
+rsi_overbought = input(70, "RSI Overbought (Short)", group=group_rsi)
+
+// ========================================================================================
+// VOLATILITY & VOLUME SETTINGS
+// ========================================================================================
+group_vol = "Volatility & Volume"
+atr_length = input(14, "ATR Length", group=group_vol)
+atr_value = ta.atr(atr_length)
+
+volume_length = input(20, "Volume MA Length", group=group_vol)
+volume_ma = ta.sma(volume, volume_length)
+volume_confirmation = volume > volume_ma
+
+// ========================================================================================
+// RISK MANAGEMENT SETTINGS
+// ========================================================================================
+group_risk = "Risk Management"
+risk_reward_ratio = input(1.5, "Risk-Reward Ratio (TP/SL)", minval=0.5, maxval=5, group=group_risk)
+position_size = input(10, "Position Size %", minval=1, maxval=100, group=group_risk)
+use_atr_for_stops = input(true, "Use ATR for Stop Loss", group=group_risk)
+atr_multiplier = input(2.0, "ATR Multiplier", minval=0.5, maxval=5, group=group_risk)
+
+// ========================================================================================
+// ML PARAMETERS - Simple Momentum Learning
+// ========================================================================================
+group_ml = "Machine Learning"
+ml_lookback = input(20, "ML Lookback Period", minval=10, maxval=50, group=group_ml)
+ml_signal_threshold = input(0.6, "ML Signal Threshold", minval=0.1, maxval=1.0, step=0.1, group=group_ml)
+
+// ========================================================================================
+// FILTER SETTINGS
+// ========================================================================================
+group_filter = "Filter Settings"
+use_volume_filter = input(true, "Require Above-Avg Volume", group=group_filter)
+use_trend_filter = input(true, "Use Trend Confirmation", group=group_filter)
+use_macd_divergence = input(false, "Use MACD Divergence Detection", group=group_filter)
+
+// ========================================================================================
+// TREND DETERMINATION
+// ========================================================================================
+is_uptrend = ema20 > ema60 and ema60 > ema120
+is_downtrend = ema20 < ema60 and ema60 < ema120
+
+// ========================================================================================
+// MOMENTUM CALCULATION (ML-LIKE SCORE)
+// ========================================================================================
+macd_momentum = macd_histogram > macd_histogram[1] and macd_histogram > 0 ? 1 : macd_histogram < macd_histogram[1] and macd_histogram < 0 ? -1 : 0
+
+rsi_signal = rsi_value < rsi_oversold ? 1 : rsi_value > rsi_overbought ? -1 : 0
+
+price_trend = close > ema20 ? 1 : -1
+
+momentum_score = (macd_momentum * 0.4) + (rsi_signal * 0.3) + (price_trend * 0.3)
+
+// ========================================================================================
+// ML SIGNAL GENERATION
+// ========================================================================================
+long_ml_signal = momentum_score > ml_signal_threshold
+short_ml_signal = momentum_score < -ml_signal_threshold
+
+// ========================================================================================
+// COMPOSITE ENTRY CONDITIONS
+// ========================================================================================
+long_condition = (use_trend_filter ? is_uptrend : true) and long_ml_signal and (use_volume_filter ? volume_confirmation : true)
+short_condition = (use_trend_filter ? is_downtrend : true) and short_ml_signal and (use_volume_filter ? volume_confirmation : true)
+
+// ========================================================================================
+// STOP LOSS & TAKE PROFIT CALCULATION
+// ========================================================================================
+stop_loss_distance = use_atr_for_stops ? (atr_value * atr_multiplier) : (close * 0.02)
+take_profit_distance = stop_loss_distance * risk_reward_ratio
+
+// ========================================================================================
+// ENTRY & EXIT LOGIC WITH 1:1.5 RISK-REWARD RATIO
+// ========================================================================================
+if long_condition and strategy.position_size == 0
+    strategy.entry("Long", strategy.long, qty=strategy.percent_of_equity(position_size))
+    long_stop = close - stop_loss_distance
+    long_profit = close + take_profit_distance
+    strategy.exit("Long Exit", "Long", stop=long_stop, limit=long_profit)
+
+if short_condition and strategy.position_size == 0
+    strategy.entry("Short", strategy.short, qty=strategy.percent_of_equity(position_size))
+    short_stop = close + stop_loss_distance
+    short_profit = close - take_profit_distance
+    strategy.exit("Short Exit", "Short", stop=short_stop, limit=short_profit)
+
+// ========================================================================================
+// VISUALIZATION - Trend Lines
+// ========================================================================================
+plot(ema20, "EMA 20", color=color.blue, linewidth=1)
+plot(ema60, "EMA 60", color=color.orange, linewidth=1)
+plot(ema120, "EMA 120", color=color.red, linewidth=1)
+
+// ========================================================================================
+// VISUALIZATION - RSI
+// ========================================================================================
+plot(rsi_value, "RSI (9)", color=color.purple, linewidth=1, scale=scale.right)
+hline(rsi_oversold, "RSI Oversold", color=color.gray, linestyle=hline.style_dashed)
+hline(rsi_overbought, "RSI Overbought", color=color.gray, linestyle=hline.style_dashed)
+hline(50, "RSI Midline", color=color.gray, linestyle=hline.style_dotted)
+
+// ========================================================================================
+// VISUALIZATION - MACD Histogram
+// ========================================================================================
+colors = macd_histogram >= 0 ? color.new(color.green, 30) : color.new(color.red, 30)
+plot(macd_histogram, "MACD Histogram", color=colors, style=plot.style_columns, scale=scale.right)
+
+// ========================================================================================
+// SIGNAL ALERTS
+// ========================================================================================
+alertcondition(long_condition, title="Long Signal", message="Momentum ML Long Signal triggered on 15m")
+alertcondition(short_condition, title="Short Signal", message="Momentum ML Short Signal triggered on 15m")
