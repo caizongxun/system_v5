@@ -10,6 +10,9 @@ import logging
 import pickle
 import threading
 import time
+import warnings
+
+warnings.filterwarnings('ignore', category=UserWarning, message='.*feature names.*')
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -366,7 +369,7 @@ class PredictorWindow(QMainWindow):
         left_layout.addWidget(self.table)
         
         analysis_group = QGroupBox("Analysis")
-        analysis_layout = QGridLayout()
+        analysis_layout = QGridLayout(analysis_group)
         self.final_close_label = QLabel("Final: $0.00")
         self.highest_label = QLabel("High: $0.00")
         self.lowest_label = QLabel("Low: $0.00")
@@ -377,7 +380,6 @@ class PredictorWindow(QMainWindow):
         analysis_layout.addWidget(self.lowest_label, 1, 0)
         analysis_layout.addWidget(self.range_label, 1, 1)
         
-        analysis_group.setLayout(analysis_layout)
         left_layout.addWidget(analysis_group)
         left_layout.addStretch()
         
