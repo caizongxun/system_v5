@@ -1,115 +1,181 @@
 //@version=6
-strategy("CDTS Multi-TF Confluence", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=5)
+strategy("CDTS Institutional System", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=5)
 
-input_group_1 = "Multi-Timeframe Configuration"
-higher_tf = input.timeframe("240", title="Higher TF (Bias)", group=input_group_1)
-mid_tf = input.timeframe("60", title="Middle TF (Setup)", group=input_group_1)
+input_group_core = "Core Market Analysis"
+fast_ema = input.int(7, title="Fast EMA", minval=1, group=input_group_core)
+slow_ema = input.int(21, title="Slow EMA", minval=1, group=input_group_core)
+trend_ema = input.int(50, title="Trend EMA", minval=1, group=input_group_core)
 
-input_group_2 = "Mean Reversion Settings"
-basis_len = input.int(20, title="Basis Period (EMA)", minval=1, group=input_group_2)
-dev_mult = input.float(1.8, title="Deviation Multiplier", minval=0.5, group=input_group_2)
+input_group_bb = "Dynamic Bollinger Bands"
+bb_period = input.int(20, title="BB Period", minval=1, group=input_group_bb)
+bb_upper_mult = input.float(2.2, title="Upper Multiplier", minval=0.5, group=input_group_bb)
+bb_lower_mult = input.float(2.0, title="Lower Multiplier", minval=0.5, group=input_group_bb)
 
-input_group_3 = "Volume Profile Settings"
-vol_lookback = input.int(50, title="Volume Lookback", minval=10, group=input_group_3)
-node_threshold = input.float(1.5, title="Volume Node Multiplier", minval=1.0, group=input_group_3)
+input_group_rsi = "RSI Divergence Detection"
+rsi_period = input.int(14, title="RSI Period", minval=1, group=input_group_rsi)
+rsi_bullish_threshold = input.int(30, title="Bullish Divergence Level", minval=1, maxval=50, group=input_group_rsi)
+rsi_bearish_threshold = input.int(70, title="Bearish Divergence Level", minval=50, maxval=99, group=input_group_rsi)
 
-input_group_4 = "Confluence Filter"
-rsi_len = input.int(14, title="RSI Period", minval=1, group=input_group_4)
-rsi_oversold = input.int(35, title="RSI Oversold", minval=1, maxval=50, group=input_group_4)
-rsi_overbought = input.int(65, title="RSI Overbought", minval=50, maxval=99, group=input_group_4)
+input_group_macd = "MACD Confluence"
+macd_fast = input.int(12, title="MACD Fast", minval=1, group=input_group_macd)
+macd_slow = input.int(26, title="MACD Slow", minval=1, group=input_group_macd)
+macd_signal = input.int(9, title="MACD Signal", minval=1, group=input_group_macd)
 
-input_group_5 = "Risk Management"
-atr_len = input.int(14, title="ATR Period", minval=1, group=input_group_5)
-risk_reward = input.float(3.0, title="Risk-Reward Ratio", minval=1.0, group=input_group_5)
-max_bars = input.int(100, title="Max Hold Bars", minval=10, group=input_group_5)
+input_group_stoch = "Stochastic Oscillator"
+stoch_k = input.int(14, title="Stoch K Period", minval=1, group=input_group_stoch)
+stoch_d = input.int(3, title="Stoch D Period", minval=1, group=input_group_stoch)
+stoch_smooth = input.int(3, title="Stoch Smoothing", minval=1, group=input_group_stoch)
 
-basis_ema = ta.ema(close, basis_len)
-basis_dev = ta.stdev(close, basis_len) * dev_mult
-upper_band = basis_ema + basis_dev
-lower_band = basis_ema - basis_dev
+input_group_atr = "Volatility & Risk"
+atr_period = input.int(14, title="ATR Period", minval=1, group=input_group_atr)
+atr_sl_mult = input.float(1.8, title="ATR SL Multiplier", minval=0.5, group=input_group_atr)
+atr_tp_mult = input.float(3.2, title="ATR TP Multiplier", minval=1.0, group=input_group_atr)
 
-high_basis_ema = request.security(syminfo.tickerid, higher_tf, ta.ema(close, basis_len))
-high_basis_dev = request.security(syminfo.tickerid, higher_tf, ta.stdev(close, basis_len) * dev_mult)
-high_upper_band = high_basis_ema + high_basis_dev
-high_lower_band = high_basis_ema - high_basis_dev
+input_group_vol = "Volume & Strength"
+volume_lookback = input.int(20, title="Volume Lookback", minval=5, group=input_group_vol)
+volume_multiplier = input.float(1.4, title="Volume Spike Multiplier", minval=1.0, group=input_group_vol)
 
-mid_basis_ema = request.security(syminfo.tickerid, mid_tf, ta.ema(close, basis_len))
-mid_upper_band = request.security(syminfo.tickerid, mid_tf, ta.ema(close, basis_len) + ta.stdev(close, basis_len) * dev_mult)
-mid_lower_band = request.security(syminfo.tickerid, mid_tf, ta.ema(close, basis_len) - ta.stdev(close, basis_len) * dev_mult)
+input_group_regime = "Market Regime Detection"
+volatility_period = input.int(30, title="Volatility Period", minval=10, group=input_group_regime)
+trend_strength_period = input.int(10, title="Trend Strength Period", minval=5, group=input_group_regime)
 
-rsi_val = ta.rsi(close, rsi_len)
-atr_val = ta.atr(atr_len)
+input_group_pos = "Position Management"
+max_consecutive_loss = input.int(3, title="Max Consecutive Losses", minval=1, group=input_group_pos)
+max_bars_hold = input.int(120, title="Max Bars Hold", minval=10, group=input_group_pos)
+trailing_stop_pct = input.float(1.5, title="Trailing Stop %", minval=0.1, group=input_group_pos)
 
-avg_vol = ta.sma(volume, 20)
-volume_strength = volume > (avg_vol * 1.3)
+fast_line = ta.ema(close, fast_ema)
+slow_line = ta.ema(close, slow_ema)
+trend_line = ta.ema(close, trend_ema)
 
-high_vol_nodes = 0.0
-for i = 1 to vol_lookback
-    if high[i] < high and low[i] > low
-        if volume[i] > ta.sma(volume, 20) * node_threshold
-            high_vol_nodes += 1
+bb_mid = ta.sma(close, bb_period)
+bb_dev = ta.stdev(close, bb_period)
+bb_upper = bb_mid + (bb_dev * bb_upper_mult)
+bb_lower = bb_mid - (bb_dev * bb_lower_mult)
+bb_width = bb_upper - bb_lower
+bb_width_pct = (bb_width / bb_mid) * 100
 
-high_trend = high_basis_ema > high_basis_ema[1]
-low_trend = high_basis_ema < high_basis_ema[1]
+rsi_value = ta.rsi(close, rsi_period)
 
-trend_agreement_mid = mid_basis_ema > mid_basis_ema[1]
+macd_line = ta.ema(close, macd_fast) - ta.ema(close, macd_slow)
+macd_signal_line = ta.ema(macd_line, macd_signal)
+macd_histogram = macd_line - macd_signal_line
 
-close_to_basis = math.abs(close - basis_ema) < basis_dev * 0.5
-close_to_lower = close > lower_band and close < (lower_band + basis_dev * 0.3)
-close_to_upper = close < upper_band and close > (upper_band - basis_dev * 0.3)
+lowest = ta.lowest(low, stoch_k)
+highest = ta.highest(high, stoch_k)
+stoch_raw = 100 * (close - lowest) / (highest - lowest + 0.0001)
+stoch_k_line = ta.sma(stoch_raw, stoch_smooth)
+stoch_d_line = ta.sma(stoch_k_line, stoch_d)
 
-mean_revert_up = close_to_lower and rsi_val < rsi_oversold
-mean_revert_down = close_to_upper and rsi_val > rsi_overbought
+atr_value = ta.atr(atr_period)
+avg_volume = ta.sma(volume, volume_lookback)
+volume_ratio = volume / (avg_volume + 0.0001)
 
-bounce_up = (close > lower_band) and (close[1] <= lower_band) and volume_strength
-bounce_down = (close < upper_band) and (close[1] >= upper_band) and volume_strength
+trend_direction = fast_line > slow_line
+trend_strength = math.abs(fast_line - slow_line) / close * 100
 
-buy_signal = (mean_revert_up or bounce_up) and high_trend and trend_agreement_mid and volume_strength
-sell_signal = (mean_revert_down or bounce_down) and low_trend and not trend_agreement_mid and volume_strength
+volatility_current = ta.stdev(close, volatility_period)
+volatility_avg = ta.sma(volatility_current, volatility_period)
+volatility_regime = volatility_current > volatility_avg
+
+rsi_div_bullish = (low < low[1] and rsi_value > rsi_value[1]) and rsi_value < rsi_bullish_threshold
+rsi_div_bearish = (high > high[1] and rsi_value < rsi_value[1]) and rsi_value > rsi_bearish_threshold
+
+macd_bullish_cross = ta.crossover(macd_line, macd_signal_line)
+macd_bearish_cross = ta.crossunder(macd_line, macd_signal_line)
+
+stoch_bullish_cross = ta.crossover(stoch_k_line, stoch_d_line) and stoch_k_line < 30
+stoch_bearish_cross = ta.crossunder(stoch_k_line, stoch_d_line) and stoch_k_line > 70
+
+bb_bounce_up = (close > bb_lower) and (close[1] <= bb_lower) and volume_ratio > 1.2
+bb_bounce_down = (close < bb_upper) and (close[1] >= bb_upper) and volume_ratio > 1.2
+
+bb_squeeze = bb_width_pct < 12
+bb_expand = bb_width_pct > 35
+
+volume_surge = volume_ratio > volume_multiplier
+volume_decline = volume_ratio < 0.7
+
+candle_bullish = (close > open) and ((close - open) / (high - low + 0.0001)) > 0.6
+candle_bearish = (close < open) and ((open - close) / (high - low + 0.0001)) > 0.6
+
+trend_confirmation_buy = (close > bb_mid) and trend_direction and (trend_strength > 0.5)
+trend_confirmation_sell = (close < bb_mid) and not trend_direction and (trend_strength > 0.5)
+
+buy_signal_stage1 = (rsi_div_bullish or (macd_bullish_cross and macd_line > 0)) and volume_surge
+buy_signal_stage2 = buy_signal_stage1 and trend_confirmation_buy and (close > trend_line or volatility_regime)
+buy_signal_stage3 = (bb_bounce_up or stoch_bullish_cross) and trend_direction and volume_surge
+
+sell_signal_stage1 = (rsi_div_bearish or (macd_bearish_cross and macd_line < 0)) and volume_surge
+sell_signal_stage2 = sell_signal_stage1 and trend_confirmation_sell and (close < trend_line or volatility_regime)
+sell_signal_stage3 = (bb_bounce_down or stoch_bearish_cross) and not trend_direction and volume_surge
+
+buy_final = buy_signal_stage2 or buy_signal_stage3
+sell_final = sell_signal_stage2 or sell_signal_stage3
 
 var float entry_price = na
 var int bars_in_trade = 0
-var float stop_loss = na
-var float take_profit = na
-var float current_atr = na
+var float stop_loss_price = na
+var float take_profit_price = na
+var float trailing_stop = na
+var int consecutive_losses = 0
+var float max_profit = 0.0
+var int last_trade_profit = 0
 
-if buy_signal and strategy.position_size == 0
+if buy_final and strategy.position_size == 0
     entry_price := close
-    current_atr := atr_val
-    stop_loss := entry_price - current_atr
-    take_profit := entry_price + (current_atr * risk_reward)
+    stop_loss_price := entry_price - (atr_value * atr_sl_mult)
+    take_profit_price := entry_price + (atr_value * atr_tp_mult)
+    trailing_stop := entry_price
     bars_in_trade := 0
-    strategy.entry("LONG", strategy.long)
+    max_profit := 0
+    strategy.entry("BUY", strategy.long)
+    last_trade_profit := 1
 
-if sell_signal and strategy.position_size == 0
+if sell_final and strategy.position_size == 0
     entry_price := close
-    current_atr := atr_val
-    stop_loss := entry_price + current_atr
-    take_profit := entry_price - (current_atr * risk_reward)
+    stop_loss_price := entry_price + (atr_value * atr_sl_mult)
+    take_profit_price := entry_price - (atr_value * atr_tp_mult)
+    trailing_stop := entry_price
     bars_in_trade := 0
-    strategy.entry("SHORT", strategy.short)
+    max_profit := 0
+    strategy.entry("SELL", strategy.short)
+    last_trade_profit := 0
 
 if strategy.position_size > 0
     bars_in_trade += 1
-    strategy.exit("LONG_EXIT", "LONG", stop=stop_loss, limit=take_profit)
-    if bars_in_trade > max_bars
-        strategy.close("LONG")
+    current_profit = (close - entry_price) / entry_price * 100
+    if current_profit > max_profit
+        max_profit := current_profit
+        trailing_stop := close - (atr_value * trailing_stop_pct / 100 * close)
+    if bars_in_trade > max_bars_hold
+        strategy.close("BUY")
+    else
+        strategy.exit("BUY_EXIT", "BUY", stop=math.max(stop_loss_price, trailing_stop), limit=take_profit_price)
 
 if strategy.position_size < 0
     bars_in_trade += 1
-    strategy.exit("SHORT_EXIT", "SHORT", stop=stop_loss, limit=take_profit)
-    if bars_in_trade > max_bars
-        strategy.close("SHORT")
+    current_profit = (entry_price - close) / entry_price * 100
+    if current_profit > max_profit
+        max_profit := current_profit
+        trailing_stop := close + (atr_value * trailing_stop_pct / 100 * close)
+    if bars_in_trade > max_bars_hold
+        strategy.close("SELL")
+    else
+        strategy.exit("SELL_EXIT", "SELL", stop=math.min(stop_loss_price, trailing_stop), limit=take_profit_price)
 
-plot(upper_band, color=color.new(color.blue, 60), linewidth=1, title="Upper Band")
-plot(basis_ema, color=color.new(color.gray, 60), linewidth=1, title="Basis EMA")
-plot(lower_band, color=color.new(color.blue, 60), linewidth=1, title="Lower Band")
+plot(fast_line, color=color.new(color.blue, 0), linewidth=2, title="Fast EMA")
+plot(slow_line, color=color.new(color.orange, 0), linewidth=2, title="Slow EMA")
+plot(trend_line, color=color.new(color.red, 0), linewidth=1, title="Trend EMA")
 
-plot(high_upper_band, color=color.new(color.red, 80), linewidth=1, title="Higher TF Upper", display=display.none)
-plot(high_basis_ema, color=color.new(color.orange, 80), linewidth=1, title="Higher TF Basis", display=display.none)
-plot(high_lower_band, color=color.new(color.red, 80), linewidth=1, title="Higher TF Lower", display=display.none)
+plot(bb_upper, color=color.new(color.gray, 60), linewidth=1, title="BB Upper")
+plot(bb_mid, color=color.new(color.gray, 40), linewidth=1, title="BB Mid")
+plot(bb_lower, color=color.new(color.gray, 60), linewidth=1, title="BB Lower")
 
-plotshape(buy_signal, style=shape.labelup, location=location.belowbar, color=color.new(color.green, 0), text="BUY", textcolor=color.white, size=size.small)
-plotshape(sell_signal, style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 0), text="SELL", textcolor=color.white, size=size.small)
+fill(plot(bb_upper, color=na, title=na), plot(bb_lower, color=na, title=na), color=bb_squeeze ? color.new(color.yellow, 80) : color.new(color.gray, 95))
 
-plot(rsi_val, color=color.new(color.purple, 0), linewidth=1, title="RSI", display=display.none)
+plotshape(buy_final, style=shape.labelup, location=location.belowbar, color=color.new(color.green, 0), text="BUY", textcolor=color.white, size=size.small)
+plotshape(sell_final, style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 0), text="SELL", textcolor=color.white, size=size.small)
+
+plot(stoch_k_line, color=color.new(color.purple, 0), linewidth=1, title="Stoch K", display=display.none)
+plot(stoch_d_line, color=color.new(color.teal, 0), linewidth=1, title="Stoch D", display=display.none)
