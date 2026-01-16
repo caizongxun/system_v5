@@ -1,0 +1,48 @@
+//@version=6
+indicator("Momentum Change Indicator", overlay=false)
+
+input_group = "Momentum Settings"
+lookback_period = input.int(7, title="Lookback Period", minval=1, group=input_group)
+
+tr_current = high - low
+tr_prev_avg = ta.sma(tr_current, lookback_period)
+
+momentum_current = (close - open) / (high - low + 0.0001) * 100
+
+momentum_prev_avg = 0.0
+for i = 1 to lookback_period
+    momentum_prev_avg += (close[i] - open[i]) / (high[i] - low[i] + 0.0001) * 100
+momentum_prev_avg := momentum_prev_avg / lookback_period
+
+momentum_change_pct = ((momentum_current - momentum_prev_avg) / (math.abs(momentum_prev_avg) + 0.0001)) * 100
+
+volume_current = volume
+volume_prev_avg = ta.sma(volume, lookback_period)
+volume_change_pct = ((volume_current - volume_prev_avg) / (volume_prev_avg + 0.0001)) * 100
+
+price_change_current = ((close - open) / open) * 100
+price_change_prev_avg = 0.0
+for i = 1 to lookback_period
+    price_change_prev_avg += ((close[i] - open[i]) / open[i]) * 100
+price_change_prev_avg := price_change_prev_avg / lookback_period
+
+price_change_pct = ((price_change_current - price_change_prev_avg) / (math.abs(price_change_prev_avg) + 0.0001)) * 100
+
+color_momentum = momentum_change_pct >= 0 ? color.new(color.green, 0) : color.new(color.red, 0)
+color_volume = volume_change_pct >= 0 ? color.new(color.blue, 60) : color.new(color.gray, 60)
+
+plot(momentum_change_pct, color=color_momentum, linewidth=2, title="Momentum Change %")
+plot(volume_change_pct, color=color_volume, linewidth=1, title="Volume Change %")
+plot(price_change_pct, color=color.new(color.orange, 0), linewidth=1, title="Price Change %")
+
+hline(0, color=color.new(color.black, 50), linestyle=hline.style_dashed, title="Zero Line")
+hline(10, color=color.new(color.gray, 60), linestyle=hline.style_dotted, title="Upper Reference")
+hline(-10, color=color.new(color.gray, 60), linestyle=hline.style_dotted, title="Lower Reference")
+
+plotchar(momentum_change_pct, char="", location=location.absolute, color=na, size=size.tiny)
+
+alert_up = momentum_change_pct > 20 and momentum_change_pct[1] <= 20
+alert_down = momentum_change_pct < -20 and momentum_change_pct[1] >= -20
+
+plotchar(alert_up, char="▲", location=location.belowbar, color=color.green, size=size.small)
+plotchar(alert_down, char="▼", location=location.abovebar, color=color.red, size=size.small)
