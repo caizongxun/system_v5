@@ -1,5 +1,5 @@
 //@version=6
-strategy("CDTS - Crypto Day Trading System", overlay=true, margin_type=strategy.fixed, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+strategy("CDTS - Crypto Day Trading System", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
 
 input_group_1 = "Timeframe Configuration"
 tf_4h = input.timeframe("240", title="4H Timeframe", group=input_group_1)
@@ -64,28 +64,29 @@ ema_200_4h = request.security(syminfo.tickerid, tf_4h, calc_ema(ema_200_len, clo
 ema_12_1h = request.security(syminfo.tickerid, tf_1h, calc_ema(ema_12_len, close))
 ema_50_1h = request.security(syminfo.tickerid, tf_1h, calc_ema(ema_50_len, close))
 
-bb_result = ta.bb(close, bb_len, bb_std)
-bb_mid = bb_result.bb_mid
-bb_upper = bb_result.bb_upper
-bb_lower = bb_result.bb_lower
+bb_mid = ta.sma(close, bb_len)
+bb_std_dev = ta.stdev(close, bb_len) * bb_std
+bb_upper = bb_mid + bb_std_dev
+bb_lower = bb_mid - bb_std_dev
 
 rsi_val = ta.rsi(close, rsi_len)
 
-stoch_result = ta.stoch(close, high, low, stoch_k, stoch_d, stoch_smooth)
-stoch_k_val = stoch_result.k
-stoch_d_val = stoch_result.d
+stoch_high = ta.highest(high, stoch_k)
+stoch_low = ta.lowest(low, stoch_k)
+stoch_k_val = 100 * (close - stoch_low) / (stoch_high - stoch_low)
+stoch_d_val = ta.sma(stoch_k_val, stoch_d)
 
-macd_result = ta.macd(close, macd_fast, macd_slow, macd_signal)
-macd_line = macd_result.macd
-macd_signal_line = macd_result.signal
-macd_hist = macd_result.histogram
+macd_line = ta.ema(close, macd_fast) - ta.ema(close, macd_slow)
+macd_signal_line = ta.sma(macd_line, macd_signal)
+macd_hist = macd_line - macd_signal_line
 
 atr_val = ta.atr(atr_len)
 obv_val = ta.obv(close, volume)
 obv_ema = ta.ema(obv_val, obv_len)
 
-adx_result = ta.adx(14)
-adx_val = adx_result.adx
+adx_plus = ta.ema(ta.change(high) > 0 ? ta.change(high) : 0, 14)
+adx_minus = ta.ema(ta.change(low) < 0 ? -ta.change(low) : 0, 14)
+adx_val = 100 * ta.sma(math.abs(adx_plus - adx_minus) / (adx_plus + adx_minus), 14)
 
 avg_volume = ta.sma(volume, 5)
 
