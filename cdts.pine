@@ -81,7 +81,9 @@ macd_signal_line = ta.sma(macd_line, macd_signal)
 macd_hist = macd_line - macd_signal_line
 
 atr_val = ta.atr(atr_len)
-obv_val = ta.obv(close, volume)
+
+obv_raw = close > close[1] ? volume : close < close[1] ? -volume : 0
+obv_val = ta.cum(obv_raw)
 obv_ema = ta.ema(obv_val, obv_len)
 
 adx_plus = ta.ema(ta.change(high) > 0 ? ta.change(high) : 0, 14)
