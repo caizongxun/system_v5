@@ -1,111 +1,117 @@
 //@version=6
-strategy("CDTS BB Momentum Strategy", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=5)
+strategy("CDTS Zero-Lag Adaptive", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=5)
 
-input_group_1 = "Bollinger Bands Settings"
-bb_len = input.int(20, title="BB Period", minval=1, group=input_group_1)
-bb_std = input.float(2.0, title="BB Std Dev", minval=0.5, group=input_group_1)
-bb_src = input(close, title="BB Source", group=input_group_1)
+input_group_1 = "Zero-Lag EMA Settings"
+fast_len = input.int(9, title="Fast ZLEMA", minval=1, group=input_group_1)
+slow_len = input.int(21, title="Slow ZLEMA", minval=1, group=input_group_1)
 
 input_group_2 = "Momentum Settings"
-mom_len = input.int(9, title="Momentum Period", minval=1, group=input_group_2)
-roc_len = input.int(12, title="ROC Period", minval=1, group=input_group_2)
+mom_period = input.int(5, title="Real-Time Momentum Period", minval=1, group=input_group_2)
+v_threshold = input.float(0.5, title="Volatility Threshold", minval=0.1, group=input_group_2)
 
-input_group_3 = "Squeeze Detection"
-squeeze_threshold = input.float(0.3, title="Squeeze Threshold (0-1)", minval=0, maxval=1, group=input_group_3)
-min_squeeze_bars = input.int(5, title="Min Squeeze Bars", minval=1, group=input_group_3)
+input_group_3 = "Adaptive Risk"
+atr_len = input.int(14, title="ATR Period", minval=1, group=input_group_3)
+sl_mult = input.float(1.5, title="SL Multiplier", minval=0.5, group=input_group_3)
+tp_mult = input.float(2.5, title="TP Multiplier", minval=1.0, group=input_group_3)
+max_bars = input.int(80, title="Max Hold Bars", minval=10, group=input_group_3)
 
-input_group_4 = "Risk Management"
-sl_pct = input.float(1.0, title="SL Percent", minval=0.1, group=input_group_4)
-tp_pct = input.float(2.5, title="TP Percent", minval=0.1, group=input_group_4)
-max_bars = input.int(60, title="Max Hold Bars", minval=10, group=input_group_4)
+zlema(src, length) =>
+    ema1 = ta.ema(src, length)
+    ema2 = ta.ema(ema1, length)
+    ema1 * 2 - ema2
 
-bb_mid = ta.sma(bb_src, bb_len)
-bb_std_dev = ta.stdev(bb_src, bb_len) * bb_std
-bb_upper = bb_mid + bb_std_dev
-bb_lower = bb_mid - bb_std_dev
+zlema_fast = zlema(close, fast_len)
+zlema_slow = zlema(close, slow_len)
 
-bb_width = bb_upper - bb_lower
-bb_width_sma = ta.sma(bb_width, bb_len)
-bb_width_ratio = bb_width / (bb_width_sma + 0.0001)
+body_size = math.abs(close - open)
+wicks_sum = (high - math.max(close, open)) + (math.min(close, open) - low)
+total_range = high - low
 
-mom = close - close[mom_len]
-mom_ema = ta.ema(mom, 5)
+body_ratio = body_size / (total_range + 0.0001)
+wick_ratio = wicks_sum / (total_range + 0.0001)
 
-roc = ((close - close[roc_len]) / close[roc_len]) * 100
-roc_ema = ta.ema(roc, 5)
+momentum_raw = (close - close[1]) * body_ratio
+volatility_raw = ta.atr(atr_len) / close * 100
+volatility_adaptive = ta.ema(volatility_raw, 5)
 
-pct_b = (close - bb_lower) / (bb_upper - bb_lower + 0.0001)
+momentum_instant = momentum_raw * (1 + volatility_adaptive / 100)
 
-squeeze_state = bb_width_ratio < squeeze_threshold
-squeeze_bars = 0
-for i = 0 to min_squeeze_bars - 1
-    if squeeze_state[i]
-        squeeze_bars += 1
+price_momentum_score = 0.0
+for i = 0 to math.min(mom_period - 1, 4)
+    if i < mom_period
+        price_momentum_score += (close[i] > open[i] ? 1 : -1) * body_ratio[i]
 
-breakout_up = close > bb_upper and close[1] <= bb_upper[1]
-breakout_down = close < bb_lower and close[1] >= bb_lower[1]
+price_momentum_score := price_momentum_score / mom_period
 
-momentum_div_buy = low[1] < low and mom[1] > mom and mom[1] > 0
-momentum_div_sell = high[1] > high and mom[1] < mom and mom[1] < 0
+high_low_diff = high - low
+high_low_avg = ta.sma(high_low_diff, 20)
+volatility_expansion = high_low_diff > (high_low_avg * 1.5)
 
-energy_index = 0.0
-energy_index += (mom_ema > 0 ? 2 : -2)
-energy_index += (roc_ema > 0 ? 2 : -2)
-energy_index += (pct_b > 0.7 ? 1 : pct_b < 0.3 ? -1 : 0)
-energy_index += (bb_width_ratio > 1.2 ? 1 : bb_width_ratio < 0.8 ? -1 : 0)
+div_bullish = low < low[1] and momentum_instant > momentum_instant[1] and momentum_instant > 0
+div_bearish = high > high[1] and momentum_instant < momentum_instant[1] and momentum_instant < 0
 
-if close > bb_mid and close[1] <= bb_mid
-    energy_index += 1
-if close < bb_mid and close[1] >= bb_mid
-    energy_index -= 1
+trend_up = zlema_fast > zlema_slow
+trend_down = zlema_fast < zlema_slow
 
-volume_surge = volume > ta.sma(volume, 20) * 1.3
-energy_index += (volume_surge ? 1 : 0)
+volume_strength = volume > ta.sma(volume, 20) * 1.2
 
-strong_bullish = (breakout_up or momentum_div_buy) and (energy_index >= 4) and volume_surge
-strong_bearish = (breakout_down or momentum_div_sell) and (energy_index <= -4) and volume_surge
+candle_bullish = close > open and body_ratio > 0.6 and wicks_sum < body_size
+candle_bearish = close < open and body_ratio > 0.6 and wicks_sum < body_size
+
+acceleration_up = momentum_instant > momentum_instant[1] and momentum_instant > 0
+acceleration_down = momentum_instant < momentum_instant[1] and momentum_instant < 0
+
+buy_trigger1 = trend_up and acceleration_up and volume_strength
+buy_trigger2 = div_bullish and trend_up and candle_bullish
+buy_trigger3 = (zlema_fast > zlema_slow and zlema_fast[1] <= zlema_slow[1]) and volume_strength
+
+buy_signal = buy_trigger1 or buy_trigger2 or buy_trigger3
+
+sell_trigger1 = trend_down and acceleration_down and volume_strength
+sell_trigger2 = div_bearish and trend_down and candle_bearish
+sell_trigger3 = (zlema_fast < zlema_slow and zlema_fast[1] >= zlema_slow[1]) and volume_strength
+
+sell_signal = sell_trigger1 or sell_trigger2 or sell_trigger3
 
 var float entry_price = na
-var int bars_in_position = 0
+var int bars_in_trade = 0
 var float stop_loss = na
 var float take_profit = na
+var float current_atr = na
 
-if strong_bullish and strategy.position_size == 0
+if buy_signal and strategy.position_size == 0
     entry_price := close
-    bars_in_position := 0
-    stop_loss := entry_price * (1 - sl_pct / 100)
-    take_profit := entry_price * (1 + tp_pct / 100)
+    current_atr := ta.atr(atr_len)
+    stop_loss := entry_price - (current_atr * sl_mult)
+    take_profit := entry_price + (current_atr * tp_mult)
+    bars_in_trade := 0
     strategy.entry("LONG", strategy.long)
 
-if strong_bearish and strategy.position_size == 0
+if sell_signal and strategy.position_size == 0
     entry_price := close
-    bars_in_position := 0
-    stop_loss := entry_price * (1 + sl_pct / 100)
-    take_profit := entry_price * (1 - tp_pct / 100)
+    current_atr := ta.atr(atr_len)
+    stop_loss := entry_price + (current_atr * sl_mult)
+    take_profit := entry_price - (current_atr * tp_mult)
+    bars_in_trade := 0
     strategy.entry("SHORT", strategy.short)
 
 if strategy.position_size > 0
-    bars_in_position += 1
+    bars_in_trade += 1
     strategy.exit("LONG_EXIT", "LONG", stop=stop_loss, limit=take_profit)
-    if bars_in_position > max_bars
+    if bars_in_trade > max_bars
         strategy.close("LONG")
 
 if strategy.position_size < 0
-    bars_in_position += 1
+    bars_in_trade += 1
     strategy.exit("SHORT_EXIT", "SHORT", stop=stop_loss, limit=take_profit)
-    if bars_in_position > max_bars
+    if bars_in_trade > max_bars
         strategy.close("SHORT")
 
-plot(bb_upper, color=color.new(color.blue, 60), linewidth=1, title="BB Upper")
-plot(bb_mid, color=color.new(color.gray, 60), linewidth=1, title="BB Mid")
-plot(bb_lower, color=color.new(color.blue, 60), linewidth=1, title="BB Lower")
+plot(zlema_fast, color=color.new(color.blue, 0), linewidth=2, title="ZLEMA Fast")
+plot(zlema_slow, color=color.new(color.orange, 0), linewidth=2, title="ZLEMA Slow")
 
-colored_bands = bb_width_ratio < squeeze_threshold ? color.new(color.yellow, 80) : color.new(color.gray, 95)
-fill(plot(bb_upper, na, na), plot(bb_lower, na, na), color=colored_bands)
+plot(momentum_instant * 100, color=color.new(color.purple, 0), linewidth=1, title="Instant Momentum")
+hline(0, color=color.new(color.black, 50), linestyle=hline.style_dashed, title="Zero Line")
 
-plotshape(strong_bullish, style=shape.labelup, location=location.belowbar, color=color.new(color.green, 0), text="BUY", textcolor=color.white, size=size.small)
-plotshape(strong_bearish, style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 0), text="SELL", textcolor=color.white, size=size.small)
-
-hline(4, color=color.new(color.green, 60), linestyle=hline.style_dashed, title="Energy Bullish Threshold")
-hline(-4, color=color.new(color.red, 60), linestyle=hline.style_dashed, title="Energy Bearish Threshold")
-hline(0, color=color.new(color.black, 50), linestyle=hline.style_solid, title="Energy Zero")
+plotshape(buy_signal, style=shape.labelup, location=location.belowbar, color=color.new(color.green, 0), text="BUY", textcolor=color.white, size=size.small)
+plotshape(sell_signal, style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 0), text="SELL", textcolor=color.white, size=size.small)
