@@ -120,34 +120,31 @@ sell_qualified = sell_score >= 12 and volume_surge and not bb_squeeze
 buy_confirmed = buy_qualified and price_above_ema21 and bb_lower_touch
 sell_confirmed = sell_qualified and price_below_ema21 and bb_upper_touch
 
-atr_stop = atr_val * sl_mult
-atr_profit = atr_val * tp_mult
-
 var float entry_price = na
 var int bars_in_trade = 0
+var float stop_loss = na
+var float take_profit = na
 
 if buy_confirmed and strategy.position_size == 0
     entry_price := close
     bars_in_trade := 0
+    stop_loss := entry_price - (atr_val * sl_mult)
+    take_profit := entry_price + (atr_val * tp_mult)
     strategy.entry("Buy", strategy.long)
+    strategy.exit("CloseBuy", "Buy", stop=stop_loss, limit=take_profit)
 
 if sell_confirmed and strategy.position_size == 0
     entry_price := close
     bars_in_trade := 0
+    stop_loss := entry_price + (atr_val * sl_mult)
+    take_profit := entry_price - (atr_val * tp_mult)
     strategy.entry("Sell", strategy.short)
+    strategy.exit("CloseSell", "Sell", stop=stop_loss, limit=take_profit)
 
 if strategy.position_size != 0
     bars_in_trade += 1
-
-if strategy.position_size > 0
-    strategy.exit("CloseBuy", "Buy", stop=entry_price - atr_stop, limit=entry_price + atr_profit)
     if bars_in_trade > max_bars_hold
-        strategy.close("Buy")
-
-if strategy.position_size < 0
-    strategy.exit("CloseSell", "Sell", stop=entry_price + atr_stop, limit=entry_price - atr_profit)
-    if bars_in_trade > max_bars_hold
-        strategy.close("Sell")
+        strategy.close_all()
 
 plotshape(buy_confirmed, style=shape.labelup, location=location.belowbar, color=color.new(color.green, 0), text="BUY", textcolor=color.white, size=size.small)
 plotshape(sell_confirmed, style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 0), text="SELL", textcolor=color.white, size=size.small)
