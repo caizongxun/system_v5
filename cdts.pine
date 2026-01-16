@@ -37,40 +37,47 @@ volume_threshold = input.float(1.4, title="Volume Confirmation Multiplier", minv
 input_group_9 = "Signal Filtering Sensitivity"
 filter_sensitivity = input.string("BALANCED", title="Filter Sensitivity", options=["AGGRESSIVE", "BALANCED", "CONSERVATIVE"], group=input_group_9)
 adr_threshold = input.float(25.0, title="ADX Threshold", minval=10, group=input_group_9)
-bb_width_threshold = input.float(0.015, title="BB Width Min Threshold (% of close)", minval=0.001, group=input_group_9)
+bb_width_threshold = input.float(0.015, title="BB Width Min Threshold", minval=0.001, group=input_group_9)
 input_group_10 = "Risk Management"
-risk_percent = input.float(0.5, title="Risk Per Trade (%)", minval=0.1, maxval=2.0, group=input_group_10)
-max_daily_loss = input.float(2.0, title="Max Daily Loss (%)", minval=0.5, maxval=5.0, group=input_group_10)
-consecutive_wins_increase = input.int(3, title="Consecutive Wins to Increase Unit", minval=1, group=input_group_10)
-consecutive_loss_decrease = input.int(2, title="Consecutive Loss to Decrease Unit", minval=1, group=input_group_10)
-unit_increase_pct = input.float(20, title="Unit Increase (%)", minval=5, group=input_group_10)
-unit_decrease_pct = input.float(30, title="Unit Decrease (%)", minval=10, group=input_group_10)
+risk_percent = input.float(0.5, title="Risk Per Trade", minval=0.1, maxval=2.0, group=input_group_10)
+max_daily_loss = input.float(2.0, title="Max Daily Loss", minval=0.5, maxval=5.0, group=input_group_10)
+consecutive_wins = input.int(3, title="Consecutive Wins to Increase Unit", minval=1, group=input_group_10)
+consecutive_loss = input.int(2, title="Consecutive Loss to Decrease Unit", minval=1, group=input_group_10)
+unit_increase_pct = input.float(20, title="Unit Increase", minval=5, group=input_group_10)
+unit_decrease_pct = input.float(30, title="Unit Decrease", minval=10, group=input_group_10)
 calc_ema(length, source) => ta.ema(source, length)
-get_4h_data() =>
-    [open4h, high4h, low4h, close4h, vol4h] = [request.security(syminfo.tickerid, tf_4h, open), request.security(syminfo.tickerid, tf_4h, high), request.security(syminfo.tickerid, tf_4h, low), request.security(syminfo.tickerid, tf_4h, close), request.security(syminfo.tickerid, tf_4h, volume)]
-    [open4h, high4h, low4h, close4h, vol4h]
-get_1h_data() =>
-    [open1h, high1h, low1h, close1h, vol1h] = [request.security(syminfo.tickerid, tf_1h, open), request.security(syminfo.tickerid, tf_1h, high), request.security(syminfo.tickerid, tf_1h, low), request.security(syminfo.tickerid, tf_1h, close), request.security(syminfo.tickerid, tf_1h, volume)]
-    [open1h, high1h, low1h, close1h, vol1h]
+get_4h_open = request.security(syminfo.tickerid, tf_4h, open)
+get_4h_high = request.security(syminfo.tickerid, tf_4h, high)
+get_4h_low = request.security(syminfo.tickerid, tf_4h, low)
+get_4h_close = request.security(syminfo.tickerid, tf_4h, close)
+get_4h_vol = request.security(syminfo.tickerid, tf_4h, volume)
+get_1h_open = request.security(syminfo.tickerid, tf_1h, open)
+get_1h_high = request.security(syminfo.tickerid, tf_1h, high)
+get_1h_low = request.security(syminfo.tickerid, tf_1h, low)
+get_1h_close = request.security(syminfo.tickerid, tf_1h, close)
+get_1h_vol = request.security(syminfo.tickerid, tf_1h, volume)
 ema_5_15m = calc_ema(ema_5_len, close)
 ema_12_15m = calc_ema(ema_12_len, close)
 ema_20_15m = calc_ema(ema_20_len, close)
 ema_50_15m = calc_ema(ema_50_len, close)
 ema_200_15m = calc_ema(ema_200_len, close)
-[open_4h, high_4h, low_4h, close_4h, vol_4h] = get_4h_data()
-[open_1h, high_1h, low_1h, close_1h, vol_1h] = get_1h_data()
 ema_50_4h = request.security(syminfo.tickerid, tf_4h, calc_ema(ema_50_len, close))
 ema_200_4h = request.security(syminfo.tickerid, tf_4h, calc_ema(ema_200_len, close))
 ema_12_1h = request.security(syminfo.tickerid, tf_1h, calc_ema(ema_12_len, close))
 ema_50_1h = request.security(syminfo.tickerid, tf_1h, calc_ema(ema_50_len, close))
-[bb_mid, bb_upper, bb_lower] = ta.bb(close, bb_len, bb_std)
+bb_mid = ta.bb(close, bb_len, bb_std).bb_mid
+bb_upper = ta.bb(close, bb_len, bb_std).bb_upper
+bb_lower = ta.bb(close, bb_len, bb_std).bb_lower
 rsi_val = ta.rsi(close, rsi_len)
-[stoch_k_val, stoch_d_val] = ta.stoch(close, high, low, stoch_k, stoch_d, stoch_smooth)
-[macd_line, macd_signal_line, macd_hist] = ta.macd(close, macd_fast, macd_slow, macd_signal)
+stoch_k_val = ta.stoch(close, high, low, stoch_k, stoch_d, stoch_smooth).k
+stoch_d_val = ta.stoch(close, high, low, stoch_k, stoch_d, stoch_smooth).d
+macd_line = ta.macd(close, macd_fast, macd_slow, macd_signal).macd
+macd_signal_line = ta.macd(close, macd_fast, macd_slow, macd_signal).signal
+macd_hist = ta.macd(close, macd_fast, macd_slow, macd_signal).histogram
 atr_val = ta.atr(atr_len)
 obv_val = ta.obv(close, volume)
 obv_ema = ta.ema(obv_val, obv_len)
-adx_val = ta.adx(14)
+adx_val = ta.adx(14).adx
 avg_volume = ta.sma(volume, 5)
 bb_width = bb_upper - bb_lower
 bb_width_percent = (bb_width / close) * 100
@@ -80,8 +87,6 @@ trend_1h_bullish = ema_12_1h > ema_50_1h
 trend_1h_bearish = ema_12_1h < ema_50_1h
 price_near_bb_lower = close < bb_mid and close > bb_lower
 price_near_bb_upper = close > bb_mid and close < bb_upper
-price_above_bb_upper = close >= bb_upper
-price_below_bb_lower = close <= bb_lower
 rsi_oversold_cond = rsi_val < rsi_oversold
 rsi_overbought_cond = rsi_val > rsi_overbought
 stoch_oversold_cond = stoch_k_val < stoch_oversold
@@ -101,13 +106,7 @@ bb_width_valid = bb_width_percent > bb_width_threshold
 adx_valid = adx_val > adr_threshold
 price_cross_bb_mid_up = ta.crossover(close, bb_mid)
 price_cross_bb_mid_down = ta.crossunder(close, bb_mid)
-get_filter_threshold() =>
-    if filter_sensitivity == "AGGRESSIVE"
-        2
-    else if filter_sensitivity == "CONSERVATIVE"
-        5
-    else
-        3
+get_filter_threshold() => filter_sensitivity == "AGGRESSIVE" ? 2 : filter_sensitivity == "CONSERVATIVE" ? 5 : 3
 buy_base_score = 0.0
 buy_base_score += trend_4h_bullish ? 1 : 0
 buy_base_score += trend_1h_bullish ? 1 : 0
@@ -116,9 +115,9 @@ buy_base_score += (rsi_oversold_cond or stoch_oversold_cond) ? 1 : 0
 buy_base_score += (macd_bullish or macd_bullish_cross) ? 1 : 0
 buy_base_score += (ema_5_above_20 or ema_5_cross_20_up) ? 1 : 0
 buy_base_score += obv_trending_up ? 1 : 0
-buy_volume_score = (volume_confirmed ? 2 : 0)
-buy_pattern_score = (price_cross_bb_mid_up ? 2 : 0)
-buy_confluence_score = (adx_valid ? 1 : 0)
+buy_volume_score = volume_confirmed ? 2 : 0
+buy_pattern_score = price_cross_bb_mid_up ? 2 : 0
+buy_confluence_score = adx_valid ? 1 : 0
 buy_total_score = buy_base_score + buy_volume_score + buy_pattern_score + buy_confluence_score
 sell_base_score = 0.0
 sell_base_score += trend_4h_bearish ? 1 : 0
@@ -128,9 +127,9 @@ sell_base_score += (rsi_overbought_cond or stoch_overbought_cond) ? 1 : 0
 sell_base_score += (macd_bearish or macd_bearish_cross) ? 1 : 0
 sell_base_score += (ema_5_below_20 or ema_5_cross_20_down) ? 1 : 0
 sell_base_score += obv_trending_down ? 1 : 0
-sell_volume_score = (volume_confirmed ? 2 : 0)
-sell_pattern_score = (price_cross_bb_mid_down ? 2 : 0)
-sell_confluence_score = (adx_valid ? 1 : 0)
+sell_volume_score = volume_confirmed ? 2 : 0
+sell_pattern_score = price_cross_bb_mid_down ? 2 : 0
+sell_confluence_score = adx_valid ? 1 : 0
 sell_total_score = sell_base_score + sell_volume_score + sell_pattern_score + sell_confluence_score
 filter_threshold = get_filter_threshold()
 buy_signal_qualified = buy_total_score >= filter_threshold and bb_width_valid and volume_confirmed
@@ -152,9 +151,9 @@ if buy_entry_confirmed and strategy.position_size == 0
 if sell_entry_confirmed and strategy.position_size == 0
     strategy.entry("Sell", strategy.short)
 if strategy.position_size > 0
-    strategy.exit("Sell", "Buy", stop=stop_loss_buy, limit=take_profit_buy)
+    strategy.exit("SellBuy", "Buy", stop=stop_loss_buy, limit=take_profit_buy)
 if strategy.position_size < 0
-    strategy.exit("Buy", "Sell", stop=stop_loss_sell, limit=take_profit_sell)
+    strategy.exit("BuySell", "Sell", stop=stop_loss_sell, limit=take_profit_sell)
 plotshape(buy_entry_confirmed, style=shape.labelup, location=location.belowbar, color=color.new(color.green, 0), text="BUY", textcolor=color.white, size=size.small)
 plotshape(sell_entry_confirmed, style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 0), text="SELL", textcolor=color.white, size=size.small)
 plot(ema_5_15m, color=color.new(color.blue, 0), linewidth=1, title="EMA5")
